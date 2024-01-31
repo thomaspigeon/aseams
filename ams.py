@@ -255,7 +255,7 @@ class AMS:
             self.dyn.observers.pop(-1)
             self._write_checkpoint()
         for i in range(self.n_rep):
-            self.rep_weights[i].append((self.n_rep - len(self.killed[-1])) / self.n_rep)
+            self.rep_weights[i].append(self.current_p / self.n_rep)
         return True
 
     def _finish_iteration(self):
