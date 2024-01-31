@@ -58,7 +58,7 @@ class AMS:
         if type(xi).__name__ != "CollectiveVariables":
             raise ValueError("""xi must be a CollectiveVariables object""")
         # TODO Change the check here to make it consistent with otf objects.
-        #if type(dyn).__name__ != "Langevin":
+        # if type(dyn).__name__ != "Langevin":
         #    raise ValueError("""dyn must be a Langevin object""")
         if isinstance(cv_interval, int) and cv_interval >= 1:
             self.cv_interval = cv_interval
@@ -208,21 +208,21 @@ class AMS:
         if world.rank == 0:
             os.remove(self.alive_traj_dir + "/rep_" + str(i) + ".traj")
             os.remove(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt")
-        read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
-        k = 0
-        traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=read_traj[k]))
+
+        branched_rep_z = np.readtxt(self.alive_traj_dir + "/rc_rep_" + str(j) + ".txt")
+        k_branch = np.argmin(np.abs(branched_rep_z - z_kill))[0]
+
         f = paropen(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt", "a")
-        while np.abs(self.xi.rc(read_traj[k]) - z_kill) <= self.rc_threshold:
-            traj.write(read_traj[k])
-            if self.xi.rc(read_traj[k]) >= self.z_maxs[i]:
-                self.z_maxs[i] = self.xi.rc(read_traj[k])
-            f.write(str(self.xi.rc(read_traj[k])) + "\n")
-            k += 1
-        f.write(str(self.xi.rc(read_traj[k])) + "\n")
+        np.savetxt(f, branched_rep_z[None, : (k_branch + 1)])
         f.close()
+
+        read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
+        traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=read_traj[0]))
+        traj.write(read_traj[: (k_branch + 1)])
         self.dyn.close()
-        self.dyn.atoms.set_scaled_positions(read_traj[k].get_scaled_positions())
-        self.dyn.atoms.set_momenta(read_traj[k].get_momenta())
+
+        self.dyn.atoms.set_scaled_positions(read_traj[k_branch].get_scaled_positions())
+        self.dyn.atoms.set_momenta(read_traj[k_branch].get_momenta())
         self.dyn.atoms.set_calculator(self.calc)
         traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
         self.dyn.attach(traj.write, interval=self.cv_interval)
@@ -237,8 +237,8 @@ class AMS:
             return False
         z_kill = np.sort(self.z_maxs)[self.k_min - 1]
         self.z_kill.append(z_kill)
-        killed = np.where(np.abs(self.z_maxs - z_kill) <= self.rc_threshold)[0].tolist()
-        self.killed.append(killed.copy())
+        killed = np.flatnonzero(np.abs(self.z_maxs - z_kill) <= self.rc_threshold)
+        self.killed.append(killed.tolist())
         alive = np.setdiff1d(np.arange(self.n_rep), killed)
         self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
         self._write_checkpoint()
