@@ -209,7 +209,7 @@ class AMS:
             os.remove(self.alive_traj_dir + "/rep_" + str(i) + ".traj")
             os.remove(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt")
 
-        branched_rep_z = np.readtxt(self.alive_traj_dir + "/rc_rep_" + str(j) + ".txt")
+        branched_rep_z = np.loadtxt(self.alive_traj_dir + "/rc_rep_" + str(j) + ".txt")
         branch_level = np.argmin(np.abs(branched_rep_z - z_kill))[0]
         if branched_rep_z[branch_level] < z_kill:
             branch_level += 1
@@ -220,7 +220,7 @@ class AMS:
 
         read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
         traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=read_traj[0]))
-        traj.write(read_traj[: branch_level])
+        traj.write(read_traj[:branch_level])
         self.dyn.close()
 
         self.dyn.atoms.set_scaled_positions(read_traj[branch_level].get_scaled_positions())
