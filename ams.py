@@ -210,19 +210,19 @@ class AMS:
             os.remove(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt")
 
         branched_rep_z = np.readtxt(self.alive_traj_dir + "/rc_rep_" + str(j) + ".txt")
-        k_branch = np.argmin(np.abs(branched_rep_z - z_kill))[0]
+        branch_level = np.argmin(np.abs(branched_rep_z - z_kill))[0]
 
         f = paropen(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt", "a")
-        np.savetxt(f, branched_rep_z[None, : (k_branch + 1)])
+        np.savetxt(f, branched_rep_z[None, : (branch_level + 1)])
         f.close()
 
         read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
         traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=read_traj[0]))
-        traj.write(read_traj[: (k_branch + 1)])
+        traj.write(read_traj[: (branch_level + 1)])
         self.dyn.close()
 
-        self.dyn.atoms.set_scaled_positions(read_traj[k_branch].get_scaled_positions())
-        self.dyn.atoms.set_momenta(read_traj[k_branch].get_momenta())
+        self.dyn.atoms.set_scaled_positions(read_traj[branch_level].get_scaled_positions())
+        self.dyn.atoms.set_momenta(read_traj[branch_level].get_momenta())
         self.dyn.atoms.set_calculator(self.calc)
         traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
         self.dyn.attach(traj.write, interval=self.cv_interval)
@@ -237,8 +237,8 @@ class AMS:
             return False
         z_kill = np.sort(self.z_maxs)[self.k_min - 1]
         self.z_kill.append(z_kill)
-        killed = np.flatnonzero(np.abs(self.z_maxs - z_kill) <= self.rc_threshold)
-        self.killed.append(killed.tolist())
+        killed = np.flatnonzero(self.z_maxs - z_kill <= self.rc_threshold).tolist()
+        self.killed.append(killed.copy())
         alive = np.setdiff1d(np.arange(self.n_rep), killed)
         self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
         self._write_checkpoint()
@@ -282,7 +282,7 @@ class AMS:
                 self.dyn.observers.pop(-1)
             self._write_checkpoint()
         for i in range(self.n_rep):
-            self.rep_weights[i].append((self.n_rep - len(self.killed[-1])) / self.n_rep)
+            self.rep_weights[i].append(self.current_p / self.n_rep)
 
     def _read_checkpoint(self):
         """Read the necessary information to restart an AMS run from the checkpoint file"""
