@@ -83,7 +83,7 @@ class AMS:
         self.rep_weights = [[] for i in range(n_rep)]
         self.z_kill = []
         self.killed = []
-        self.calc = dyn.atoms.calc
+        # self.calc = dyn.atoms.calc  We should not event need to have it here I think.
         self.rc_threshold = rc_threshold
         if save_all:
             self.non_reac_traj_dir = None
@@ -97,7 +97,7 @@ class AMS:
         self.ini_cond_dir = ini_cond_dir
 
     def set_progress_folder(self, progress_dir="./AMS_progress", clean=False):
-        """Where the non reactive trajectories will be stored, if the directory does not exist, it will create it."""
+        """Where the checkpoint and progress file are stored, if the directory does not exist, it will create it."""
         self.progress_dir = progress_dir
         if world.rank == 0:
             if clean and os.path.exists(self.progress_dir):
@@ -164,7 +164,7 @@ class AMS:
                     os.rename(self.ini_cond_dir + "/" + ini_cond, self.ini_cond_dir + "/" + filename + "_used" + file_extension)
                 self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
                 self.dyn.atoms.set_momenta(atoms.get_momenta())
-                self.dyn.atoms.set_calculator(self.calc)
+                # self.dyn.atoms.set_calculator(self.calc)  We shound not need to reset calculator right ?
                 traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=self.dyn.atoms))
             else:
                 read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
@@ -172,7 +172,7 @@ class AMS:
                     os.remove(self.alive_traj_dir + "/rep_" + str(i) + ".traj")
                 self.dyn.atoms.set_scaled_positions(read_traj[-1].get_scaled_positions())
                 self.dyn.atoms.set_momenta(read_traj[-1].get_momenta())
-                self.dyn.atoms.set_calculator(self.calc)
+                # self.dyn.atoms.set_calculator(self.calc) We shound not need to reset calculator right ?
                 traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
                 for at in read_traj[:-1]:
                     traj.write(at)
@@ -211,19 +211,21 @@ class AMS:
 
         branched_rep_z = np.readtxt(self.alive_traj_dir + "/rc_rep_" + str(j) + ".txt")
         branch_level = np.argmin(np.abs(branched_rep_z - z_kill))[0]
+        if branched_rep_z[branch_level] < z_kill:
+            branch_level += 1
 
         f = paropen(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt", "a")
-        np.savetxt(f, branched_rep_z[None, : (branch_level + 1)])
+        np.savetxt(f, branched_rep_z[None, : branch_level + 1])
         f.close()
 
         read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
         traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=read_traj[0]))
-        traj.write(read_traj[: (branch_level + 1)])
+        traj.write(read_traj[: branch_level])
         self.dyn.close()
 
         self.dyn.atoms.set_scaled_positions(read_traj[branch_level].get_scaled_positions())
         self.dyn.atoms.set_momenta(read_traj[branch_level].get_momenta())
-        self.dyn.atoms.set_calculator(self.calc)
+        # self.dyn.atoms.set_calculator(self.calc)   We should not need to re-set the calculator right ?
         traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
         self.dyn.attach(traj.write, interval=self.cv_interval)
         self.dyn.call_observers()
