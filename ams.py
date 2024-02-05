@@ -2,23 +2,14 @@ import numpy as np
 import os
 import shutil
 import json
-from ase.io import Trajectory, read
-from ase.parallel import parprint, paropen, world, barrier
+from ase.io import Trajectory, read, write
+from ase.parallel import parprint, paropen, world, barrier, broadcast
 
 
 class AMS:
     """Running AMS"""
 
-    def __init__(
-        self,
-        n_rep,
-        k_min,
-        dyn,
-        xi,
-        cv_interval=1,
-        rc_threshold=1.0e-3,
-        save_all=False,
-    ):
+    def __init__(self, n_rep, k_min, dyn, xi, cv_interval=1, rc_threshold=1.0e-3, save_all=False, verbose=False):
         """
         Parameters:
 
@@ -31,7 +22,6 @@ class AMS:
 
         dyn: MolecularDynamics object
             Should be a stochastic dynamics
-            TODO: Take a list of n_rep dynamics for parallel runs, check NEB calculations
 
         xi: CollectiveVariable object
             Object that allows to measure whether the dynamics is in reactant (R) state, in product (P) state and the
@@ -87,6 +77,7 @@ class AMS:
         self.rc_threshold = rc_threshold
         if save_all:
             self.non_reac_traj_dir = None
+        self.verbose = verbose
 
     def set_ini_cond_dir(self, ini_cond_dir="./ini_conds"):
         """Where the initial conditions for AMS will be written, raise error if the directory does not exist or is empty"""
@@ -156,15 +147,21 @@ class AMS:
             for j in range(i + 1):
                 self.z_maxs[j] = np.max(np.loadtxt(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt"))
         while i < self.n_rep:
+            if self.verbose:
+                parprint("Initialize :", i)
             if i > rep:
-                ini_cond = np.random.choice([ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini])
+                if world.rank == 0:
+                    ini_cond = np.random.choice([ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini])
+                else:
+                    ini_cond = None
+                ini_cond = broadcast(ini_cond)
                 atoms = read(self.ini_cond_dir + "/" + ini_cond, index=0)
                 if world.rank == 0:
                     filename, file_extension = os.path.splitext(ini_cond)
                     os.rename(self.ini_cond_dir + "/" + ini_cond, self.ini_cond_dir + "/" + filename + "_used" + file_extension)
                 self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
                 self.dyn.atoms.set_momenta(atoms.get_momenta())
-                # self.dyn.atoms.set_calculator(self.calc)  We shound not need to reset calculator right ?
+                # self.dyn.atoms.set_calculator(self.calc)  # We shound not need to reset calculator right ?
                 traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=self.dyn.atoms))
             else:
                 read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
@@ -172,7 +169,7 @@ class AMS:
                     os.remove(self.alive_traj_dir + "/rep_" + str(i) + ".traj")
                 self.dyn.atoms.set_scaled_positions(read_traj[-1].get_scaled_positions())
                 self.dyn.atoms.set_momenta(read_traj[-1].get_momenta())
-                # self.dyn.atoms.set_calculator(self.calc) We shound not need to reset calculator right ?
+                # self.dyn.atoms.set_calculator(self.calc)  # We shound not need to reset calculator right ?
                 traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
                 for at in read_traj[:-1]:
                     traj.write(at)
@@ -210,22 +207,19 @@ class AMS:
             os.remove(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt")
 
         branched_rep_z = np.loadtxt(self.alive_traj_dir + "/rc_rep_" + str(j) + ".txt")
-        branch_level = np.argmin(np.abs(branched_rep_z - z_kill))[0]
-        if branched_rep_z[branch_level] < z_kill:
-            branch_level += 1
-
+        branch_level = np.flatnonzero(branched_rep_z >= z_kill)[0]  # First occurence of branched_rep_z above z_kill
         f = paropen(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt", "a")
-        np.savetxt(f, branched_rep_z[None, : branch_level + 1])
+        np.savetxt(f, branched_rep_z[: branch_level + 1])
         f.close()
 
         read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
-        traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=read_traj[0]))
-        traj.write(read_traj[:branch_level])
-        self.dyn.close()
+        # traj = self.dyn.closelater(Trajectory(filename=, mode="w", atoms=read_traj[0]))
+        write(self.alive_traj_dir + "/rep_" + str(i) + ".traj", read_traj[: branch_level + 1])
+        # self.dyn.close()
 
         self.dyn.atoms.set_scaled_positions(read_traj[branch_level].get_scaled_positions())
         self.dyn.atoms.set_momenta(read_traj[branch_level].get_momenta())
-        # self.dyn.atoms.set_calculator(self.calc)   We should not need to re-set the calculator right ?
+        # self.dyn.atoms.set_calculator(self.calc)  # We should not need to re-set the calculator right ?
         traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
         self.dyn.attach(traj.write, interval=self.cv_interval)
         self.dyn.call_observers()
@@ -250,7 +244,11 @@ class AMS:
             return False
         while len(killed) > 0:
             i = killed.pop()
-            j = np.random.choice(alive)
+            if world.rank == 0:
+                j = np.random.choice(alive)
+            else:
+                j = None
+            j = broadcast(j)
             self._branch_replica(i, j, z_kill)
             self._until_r_or_p(i)
             self.dyn.close()
@@ -268,9 +266,13 @@ class AMS:
             i = killed.pop()
             rc_traj = np.loadtxt(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt")
             if len(rc_traj.shape) == 0:
-                rc_traj.reshape([1])
+                rc_traj = rc_traj.reshape([1])
             if np.max(rc_traj) <= z_kill and (rc_traj[-1] <= -1.0e8 or rc_traj[-1] >= 1.0e8):
-                j = np.random.choice(alive)
+                if world.rank == 0:
+                    j = np.random.choice(alive)
+                else:
+                    j = None
+                j = broadcast(j)
                 self._branch_replica(i, j, z_kill)
                 self._until_r_or_p(i)
             elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -1.0e8 or rc_traj[-1] >= 1.0e8):
@@ -311,18 +313,23 @@ class AMS:
     def run(self):
         """Run AMS, should handle the restarts correctly"""
         if os.path.exists(self.progress_dir + "/ams_checkpoint.txt"):
-            parprint("Read checkpoint")
+            if self.verbose:
+                parprint("Read checkpoint")
             self._read_checkpoint()
         barrier()  # Wait for all threads to read checkpoint
         if not self.initialized:
             self.dyn.observers = []
             self._initialize()
+        if self.verbose:
+            parprint("Initialisation done")
         if os.path.exists(self.progress_dir + "/ams_checkpoint.txt") and self.initialized and not self.finished and self.dyn.nsteps == 1:
             self.dyn.observers = []
             self._finish_iteration()
         continue_running = True
         with paropen(self.progress_dir + "/ams_progress.txt", "a") as progress_file:
             while continue_running:
+                if self.verbose:
+                    parprint("AMS iteration:", self.ams_it)
                 self.dyn.observers = []
                 continue_running = self._iteration()
                 np.savetxt(progress_file, np.hstack(([self.ams_it, self.current_p], self.z_maxs))[None, :])
