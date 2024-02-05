@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import shutil
 from ase.io import Trajectory, read, write
 from ase.parallel import world
 
@@ -112,4 +113,89 @@ class InitialConditionsSampler:
                     self.dyn.atoms.set_scaled_positions(at.get_scaled_positions())
                     self.dyn.atoms.set_momenta(at.get_momenta())
             n_cdt += 1
+        return t_r_sigma, t_sigma_r
 
+
+class InitialConditionsSamplerFromFile:
+    """Class to sample initial conditions to run AMS later"""
+
+    def __init__(self, xi, cv_interval=1):
+        """An initial conditions sampler with a single replica
+
+        Parameters:
+
+        xi: CollectiveVariable object
+            Object that allows to measure whether the dynamics is in reactant (R) state, in product (P) state and the
+            progress on the transitions
+
+        cv_interval: int
+            The CV is evaluated every cv_interval time steps
+        """
+        if type(xi).__name__ != "CollectiveVariables":
+            raise ValueError("""xi must be a CollectiveVariables object""")
+        if isinstance(cv_interval, int) and cv_interval >= 0:
+            self.cv_interval = cv_interval
+        else:
+            raise ValueError("""cv_interval must be an int >= 0""")
+
+        self.xi = xi
+        self.run_dir = None
+        self.ini_cond_dir = None
+
+    def set_ini_cond_dir(self, ini_cond_dir="./ini_conds", clean=False):
+        """Where the initial conditions for AMS will be written, if the directory does not exist, it will create it."""
+        self.ini_cond_dir = ini_cond_dir
+        if world.rank == 0:
+            if clean and os.path.exists(self.ini_cond_dir):
+                shutil.rmtree(self.ini_cond_dir)
+            if not os.path.exists(self.ini_cond_dir):
+                os.mkdir(self.ini_cond_dir)
+
+    def sample(self, file):
+        """Sampling initial conditions
+
+        Parameters:
+
+        file: str
+            path to the trajectory file
+        """
+        if self.ini_cond_dir is None:
+            raise ValueError("""The directory to store initial conditions is not defined ! Call initialconditionssampler.set_ini_cond_dir""")
+
+        if isinstance(self.xi.cv_r, list):
+            t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
+            t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
+        else:
+            t_r_sigma = [[]]
+            t_sigma_r = [[]]
+
+        n_cdt, n_stp = 0, 0
+        n_ini_conds_already = len(os.listdir(self.ini_cond_dir))
+        traj = read(file, index=":")
+        n_steps = len(traj)
+        while not self.xi.in_r(traj[n_stp]):
+            n_stp += self.cv_interval
+            if n_stp >= n_steps:
+                break
+        while n_stp < n_steps:
+            which_r = np.where(self.xi.in_which_r(traj[n_stp]) == np.max(self.xi.in_which_r(traj[n_stp])))[0][0]
+            t_r_sigma[which_r].append(0)
+            while not self.xi.above_which_sigma(traj[n_stp])[which_r]:
+                n_stp += self.cv_interval
+                if n_stp >= n_steps:
+                    t_r_sigma[which_r].pop()
+                    break
+                t_r_sigma[which_r][-1] += self.cv_interval
+            if n_stp >= n_steps:  # If we have quit previous loop, we should also quit the main loop
+                break
+            fname = self.ini_cond_dir + "/" + str(n_ini_conds_already + n_cdt + 1) + ".extxyz"
+            write(fname, traj[n_stp])
+            t_sigma_r[which_r].append(0)
+            while not self.xi.in_r(traj[n_stp]):
+                n_stp += self.cv_interval
+                if n_stp >= n_steps:
+                    t_sigma_r[which_r].pop()
+                    break
+                t_sigma_r[which_r][-1] += self.cv_interval
+            n_cdt += 1
+        return t_r_sigma, t_sigma_r
