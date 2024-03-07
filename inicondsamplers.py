@@ -44,7 +44,9 @@ class InitialConditionsSampler:
         self.run_dir = run_dir
         if not os.path.exists(self.run_dir) and world.rank == 0:
             os.mkdir(self.run_dir)
-        traj = Trajectory(filename=self.run_dir + "/md_traj.traj", mode="a", atoms=self.dyn.atoms)
+        n_traj_already = len([fi for fi in os.listdir(self.run_dir) if fi.endswith(".traj")])
+        traj = Trajectory(filename=self.run_dir + "/md_traj_{}.traj".format(n_traj_already), mode="a", atoms=self.dyn.atoms)
+        self.trajfile = self.run_dir + "/md_traj_{}.traj".format(n_traj_already)
         self.dyn.attach(traj.write, interval=self.cv_interval)
 
     def set_ini_cond_dir(self, ini_cond_dir="./ini_conds"):
@@ -83,7 +85,7 @@ class InitialConditionsSampler:
                                 int > 0 if n_conditions is set to None"""
             )
         n_cdt, n_stp = 0, 0
-        n_ini_conds_already = len(os.listdir(self.ini_cond_dir))
+        n_ini_conds_already = len([ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith(".extyxz")])
         if isinstance(self.xi.cv_r, list):
             t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
             t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
@@ -97,7 +99,7 @@ class InitialConditionsSampler:
             which_r = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
             t_r_sigma[which_r].append(0)
             t_sigma_r[which_r].append(0)
-            while not self.xi.above_which_sigma(self.dyn.atoms)[which_r]:
+            while not self.xi.above_sigma(self.dyn.atoms):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 t_r_sigma[which_r][-1] += self.cv_interval
@@ -108,7 +110,7 @@ class InitialConditionsSampler:
                 n_stp += self.cv_interval
                 t_sigma_r[which_r][-1] += self.cv_interval
                 if self.xi.is_out_of_r_zone(self.dyn.atoms):
-                    list_atoms = read(self.run_dir + "/md_traj.traj", index=":")
+                    list_atoms = read(self.trajfile, index=":")
                     at = list_atoms[np.random.randint(len(list_atoms))]
                     self.dyn.atoms.set_scaled_positions(at.get_scaled_positions())
                     self.dyn.atoms.set_momenta(at.get_momenta())
@@ -170,7 +172,7 @@ class InitialConditionsSamplerFromFile:
             t_sigma_r = [[]]
 
         n_cdt, n_stp = 0, 0
-        n_ini_conds_already = len(os.listdir(self.ini_cond_dir))
+        n_ini_conds_already = len([ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith(".extyxz")])
         traj = read(file, index=":")
         n_steps = len(traj)
         while not self.xi.in_r(traj[n_stp]):
@@ -180,7 +182,7 @@ class InitialConditionsSamplerFromFile:
         while n_stp < n_steps:
             which_r = np.where(self.xi.in_which_r(traj[n_stp]) == np.max(self.xi.in_which_r(traj[n_stp])))[0][0]
             t_r_sigma[which_r].append(0)
-            while not self.xi.above_which_sigma(traj[n_stp])[which_r]:
+            while not self.xi.above_sigma(traj[n_stp]):
                 n_stp += self.cv_interval
                 if n_stp >= n_steps:
                     t_r_sigma[which_r].pop()
