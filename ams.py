@@ -3,6 +3,7 @@ import os
 import shutil
 import json
 from ase.io import Trajectory, read, write
+from ase.io.formats import UnknownFileTypeError
 from ase.parallel import parprint, paropen, world, barrier, broadcast
 
 
@@ -36,6 +37,8 @@ class AMS:
         save_all: boolean
             whether all the trajectories of the replicas should be saved. If false, only the current state of the
             replicas is written in the AMS.current_replicas_dir
+        verbose: boolean
+            Should AMS print information about progression
         """
         if isinstance(n_rep, int) and n_rep > 1:
             self.n_rep = n_rep
@@ -66,17 +69,15 @@ class AMS:
         self.dyn = dyn
         self.dyn.nsteps = 1
         self.ini_cond_dir = None
-        self.alive_traj_dir = None
+        self.ams_dir = None
         self.z_maxs = None
         self.ams_it = 0
         self.current_p = 1
         self.rep_weights = [[] for i in range(n_rep)]
         self.z_kill = []
         self.killed = []
-        # self.calc = dyn.atoms.calc  We should not event need to have it here I think.
+        # self.calc = dyn.atoms.calc  # We should not event need to have it here I think.
         self.rc_threshold = rc_threshold
-        if save_all:
-            self.non_reac_traj_dir = None
         self.verbose = verbose
 
     def set_ini_cond_dir(self, ini_cond_dir="./ini_conds"):
@@ -87,106 +88,82 @@ class AMS:
             raise ValueError("""ini_cond_dir should not be empty, use initialconditionssampler to write in it.""")
         self.ini_cond_dir = ini_cond_dir
 
-    def set_progress_folder(self, progress_dir="./AMS_progress", clean=False):
-        """Where the checkpoint and progress file are stored, if the directory does not exist, it will create it."""
-        self.progress_dir = progress_dir
-        if world.rank == 0:
-            if clean and os.path.exists(self.progress_dir):
-                shutil.rmtree(self.progress_dir)
-            if not os.path.exists(self.progress_dir):
-                os.mkdir(self.progress_dir)
-
-    def set_non_reac_traj_dir(self, non_reac_traj_dir="./AMS_non_reactive_trajectories", clean=False):
-        """Where the non reactive trajectories will be stored, if the directory does not exist, it will create it."""
-        self.non_reac_traj_dir = non_reac_traj_dir
-        if world.rank == 0:
-            if clean and os.path.exists(self.non_reac_traj_dir):
-                shutil.rmtree(self.non_reac_traj_dir)
-            if not os.path.exists(self.non_reac_traj_dir):
-                os.mkdir(self.non_reac_traj_dir)
-
-    def set_alive_traj_dir(self, alive_traj_dir="./AMS_alive_trajectories", clean=False):
+    def set_ams_dir(self, ams_dir="./AMS", clean=False):
         """Where the alive trajectories will be stored, if the directory does not exist, it will create it.
         At the end of the run, if the estimated probability is not 0, these are reactive trajectories."""
-        self.alive_traj_dir = alive_traj_dir
+        self.ams_dir = ams_dir
         if world.rank == 0:
-            if clean and os.path.exists(self.alive_traj_dir):
-                shutil.rmtree(self.alive_traj_dir)
-            if not os.path.exists(self.alive_traj_dir):
-                os.mkdir(self.alive_traj_dir)
+            if clean and os.path.exists(self.ams_dir):
+                shutil.rmtree(self.ams_dir)
+            if not os.path.exists(self.ams_dir):
+                os.mkdir(self.ams_dir)
 
-    def _until_r_or_p(self, i):
-        while not self.xi.in_r(self.dyn.atoms) and not self.xi.in_p(self.dyn.atoms):
+    def _rc(self):
+        z = self.xi.rc(self.dyn.atoms)
+        if self.xi.in_r(self.dyn.atoms):
+            z = -np.infty
+        elif self.xi.in_p(self.dyn.atoms):
+            z = np.infty
+        return z
+
+    def _set_initialcond_dyn(self, atoms):
+        """
+        Set atomic position and momenta of a dynamic
+        """
+        self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
+        self.dyn.atoms.set_momenta(atoms.get_momenta())
+
+    def _until_r_or_p(self, i, existing_steps=0):
+        traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
+        self.dyn.attach(traj.write, interval=self.cv_interval)
+        self.dyn.nsteps = existing_steps  # Force writing the first step if start of the trajectory
+        z = self._rc()
+        f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
+        if existing_steps == 0:
+            f.write(str(z) + "\n")
+        while z > -np.infty and z < np.infty:
             self.dyn.run(self.cv_interval)
-            z = self.xi.rc(self.dyn.atoms)
-            f = paropen(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt", "a")
-            if self.xi.in_r(self.dyn.atoms):
-                z = -1.0e8
-            elif self.xi.in_p(self.dyn.atoms):
-                z = 1.0e8
+            z = self._rc()
             f.write(str(z) + "\n")
             if z >= self.z_maxs[i]:
                 self.z_maxs[i] = z
-            f.close()
+        f.close()
+        self.dyn.close()
+        self.dyn.observers.pop(-1)
 
     def _initialize(self):
         """Run the N_rep replicas from the initial condition until it enters either R or P"""
         if self.ini_cond_dir is None:
             raise ValueError("""The directory of initial conditions is not defined ! Call ams.set_ini_cond_dir""")
-        if self.alive_traj_dir is None:
-            raise ValueError("""The directory of alive trajectories is not defined ! Call ams.set_alive_traj_dir""")
-        if self.save_all is True and self.non_reac_traj_dir is None:
-            raise ValueError("""The directory of non reactive trajectories is not defined ! Call ams.set_non_reac_traj_dir""")
-        self.z_maxs = (np.ones(self.n_rep) * (-1.0e8)).tolist()
-        i = 0
-        if len(os.listdir(self.alive_traj_dir)) == 0:
-            rep = -1
-        else:
-            rep = (len(os.listdir(self.alive_traj_dir)) // 2) - 1
-            i = rep
-            for j in range(i + 1):
-                self.z_maxs[j] = np.max(np.loadtxt(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt"))
-        while i < self.n_rep:
-            if self.verbose:
-                parprint("Initialize :", i)
-            if i > rep:
-                if world.rank == 0:
-                    ini_cond = np.random.choice([ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini])
-                else:
-                    ini_cond = None
-                ini_cond = broadcast(ini_cond)
-                atoms = read(self.ini_cond_dir + "/" + ini_cond, index=0)
-                if world.rank == 0:
-                    filename, file_extension = os.path.splitext(ini_cond)
-                    os.rename(self.ini_cond_dir + "/" + ini_cond, self.ini_cond_dir + "/" + filename + "_used" + file_extension)
-                self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
-                self.dyn.atoms.set_momenta(atoms.get_momenta())
-                # self.dyn.atoms.set_calculator(self.calc)  # We shound not need to reset calculator right ?
-                traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="w", atoms=self.dyn.atoms))
+        if self.ams_dir is None:
+            raise ValueError("""The directory of alive trajectories is not defined ! Call ams.set_ams_dir""")
+        self.z_maxs = (np.ones(self.n_rep) * (-np.infty)).tolist()
+
+        existing_reps = [int(fi.split(".")[0].split("_")[-1]) for fi in os.listdir(self.ams_dir) if fi.startswith("rep_") and fi.endswith(".traj")]
+        for i in existing_reps.copy():
+            self.z_maxs[i] = np.max(np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt"))
+            try:
+                read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
+                self._set_initialcond_dyn(read_traj[-1])
+                self._until_r_or_p(i, len(read_traj))
+                self._write_checkpoint()
+            except UnknownFileTypeError:  # If loading fail just reinitialize the replica
+                existing_reps.remove(i)
+
+        to_initialize_rep = np.setdiff1d(np.arange(self.n_rep), existing_reps)
+        for i in to_initialize_rep:
+            if world.rank == 0:
+                ini_cond = np.random.choice([ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini and ini.endswith(".extxyz")])
             else:
-                read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
-                if world.rank == 0:
-                    os.remove(self.alive_traj_dir + "/rep_" + str(i) + ".traj")
-                self.dyn.atoms.set_scaled_positions(read_traj[-1].get_scaled_positions())
-                self.dyn.atoms.set_momenta(read_traj[-1].get_momenta())
-                # self.dyn.atoms.set_calculator(self.calc)  # We shound not need to reset calculator right ?
-                traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
-                for at in read_traj[:-1]:
-                    traj.write(at)
-            z = self.xi.rc(self.dyn.atoms)
-            f = paropen(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt", "a")
-            if self.xi.in_r(self.dyn.atoms):
-                z = -1.0e8
-            elif self.xi.in_p(self.dyn.atoms):
-                z = 1.0e8
-            f.write(str(z) + "\n")
-            f.close()
-            self.dyn.attach(traj.write, interval=self.cv_interval)
-            self.dyn.call_observers()
-            self._until_r_or_p(i)
-            self.dyn.close()
-            self.dyn.observers.pop(-1)
-            i += 1
+                ini_cond = None
+            ini_cond = broadcast(ini_cond)
+            atoms = read(self.ini_cond_dir + "/" + ini_cond, index=0)
+            barrier()  # Wait for all mpi process to have read the file before moving it
+            if world.rank == 0:
+                filename, file_extension = os.path.splitext(ini_cond)
+                os.rename(self.ini_cond_dir + "/" + ini_cond, self.ini_cond_dir + "/" + filename + "_used" + file_extension)
+            self._set_initialcond_dyn(atoms)
+            self._until_r_or_p(i, 0)
             self._write_checkpoint()
         for i in range(self.n_rep):
             self.rep_weights[i].append(1 / self.n_rep)
@@ -196,45 +173,43 @@ class AMS:
     def _branch_replica(self, i, j, z_kill):
         """Branch replica i by copying replica j until z_kill and run the dynamics until it reaches either R or P"""
         if self.save_all and world.rank == 0:
-            os.system("cp " + self.alive_traj_dir + "/rep_" + str(i) + ".traj " + self.non_reac_traj_dir + "/rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj")
-            json_file = paropen(self.non_reac_traj_dir + "/rep_" + str(i) + "_killed_at_" + str(self.ams_it) + "_weights.txt", "w")
+            os.system("cp " + self.ams_dir + "/rep_" + str(i) + ".traj " + self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj")
+            os.system("cp " + self.ams_dir + "/rc_rep_" + str(i) + ".txt " + self.ams_dir + "/nr_rc_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".txt")
+            json_file = paropen(self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + "_weights.txt", "w")
             weights = {"weights": self.rep_weights[i]}
             json.dump(weights, json_file, indent=4)
             json_file.close()
         self.rep_weights[i] = []
         if world.rank == 0:
-            os.remove(self.alive_traj_dir + "/rep_" + str(i) + ".traj")
-            os.remove(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt")
-
-        branched_rep_z = np.loadtxt(self.alive_traj_dir + "/rc_rep_" + str(j) + ".txt")
+            os.remove(self.ams_dir + "/rep_" + str(i) + ".traj")
+            os.remove(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
+        barrier()
+        branched_rep_z = np.loadtxt(self.ams_dir + "/rc_rep_" + str(j) + ".txt")
         branch_level = np.flatnonzero(branched_rep_z >= z_kill)[0]  # First occurence of branched_rep_z above z_kill
-        f = paropen(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt", "a")
+
+        # Save branched traj until current point included
+        f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "w")
         np.savetxt(f, branched_rep_z[: branch_level + 1])
         f.close()
 
-        read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
-        # traj = self.dyn.closelater(Trajectory(filename=, mode="w", atoms=read_traj[0]))
-        write(self.alive_traj_dir + "/rep_" + str(i) + ".traj", read_traj[: branch_level + 1])
-        # self.dyn.close()
+        read_traj = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
+        write(self.ams_dir + "/rep_" + str(i) + ".traj", read_traj[: branch_level + 1])
 
-        self.dyn.atoms.set_scaled_positions(read_traj[branch_level].get_scaled_positions())
-        self.dyn.atoms.set_momenta(read_traj[branch_level].get_momenta())
-        # self.dyn.atoms.set_calculator(self.calc)  # We should not need to re-set the calculator right ?
-        traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
-        self.dyn.attach(traj.write, interval=self.cv_interval)
-        self.dyn.call_observers()
+        self._set_initialcond_dyn(read_traj[branch_level])
+        return branch_level + 1
 
     def _iteration(self):
         """Perform one iteration of the AMS algorithm"""
-        if np.min(self.z_maxs) >= 1.0e8:
+        if np.min(self.z_maxs) >= np.infty:
             self.finished = True
             self.success = True
             self._write_checkpoint()
             return False
-        z_kill = np.sort(self.z_maxs)[self.k_min - 1]
+        z_maxs_np = np.asarray(self.z_maxs)
+        z_kill = np.sort(z_maxs_np[z_maxs_np > -np.infty])[self.k_min - 1]  # Ensure to take z_kill above infinity
         self.z_kill.append(z_kill)
-        killed = np.flatnonzero(self.z_maxs - z_kill <= self.rc_threshold).tolist()
-        self.killed.append(killed.copy())
+        killed = np.flatnonzero(z_maxs_np - z_kill <= self.rc_threshold)
+        self.killed.append(killed.tolist())
         alive = np.setdiff1d(np.arange(self.n_rep), killed)
         self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
         self._write_checkpoint()
@@ -242,17 +217,14 @@ class AMS:
             self.finished = True
             self.success = False
             return False
-        while len(killed) > 0:
-            i = killed.pop()
+        for i in killed:
             if world.rank == 0:
                 j = np.random.choice(alive)
             else:
                 j = None
             j = broadcast(j)
-            self._branch_replica(i, j, z_kill)
-            self._until_r_or_p(i)
-            self.dyn.close()
-            self.dyn.observers.pop(-1)
+            len_branch = self._branch_replica(i, j, z_kill)
+            self._until_r_or_p(i, len_branch)
             self._write_checkpoint()
         for i in range(self.n_rep):
             self.rep_weights[i].append(self.current_p / self.n_rep)
@@ -260,37 +232,30 @@ class AMS:
 
     def _finish_iteration(self):
         z_kill = self.z_kill[-1]
-        killed = self.killed[-1].copy()
-        alive = np.setdiff1d(np.arange(self.n_rep), killed)
-        while len(killed) > 0:
-            i = killed.pop()
-            rc_traj = np.loadtxt(self.alive_traj_dir + "/rc_rep_" + str(i) + ".txt")
+        alive = np.setdiff1d(np.arange(self.n_rep), self.killed[-1])
+        for i in self.killed[-1]:
+            rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
             if len(rc_traj.shape) == 0:
                 rc_traj = rc_traj.reshape([1])
-            if np.max(rc_traj) <= z_kill and (rc_traj[-1] <= -1.0e8 or rc_traj[-1] >= 1.0e8):
+            if np.max(rc_traj) <= z_kill and (rc_traj[-1] <= -np.infty or rc_traj[-1] >= np.infty):
                 if world.rank == 0:
                     j = np.random.choice(alive)
                 else:
                     j = None
                 j = broadcast(j)
-                self._branch_replica(i, j, z_kill)
-                self._until_r_or_p(i)
-            elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -1.0e8 or rc_traj[-1] >= 1.0e8):
-                read_traj = read(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
-                self.dyn.atoms.set_scaled_positions(read_traj[-1].get_scaled_positions())
-                self.dyn.atoms.set_momenta(read_traj[-1].get_momenta())
-                traj = self.dyn.closelater(Trajectory(filename=self.alive_traj_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
-                self.dyn.attach(traj.write, interval=self.cv_interval)
-                self._until_r_or_p(i)
-                self.dyn.close()
-                self.dyn.observers.pop(-1)
+                lentraj = self._branch_replica(i, j, z_kill)
+            elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -np.infty or rc_traj[-1] >= np.infty):
+                read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
+                lentraj = len(read_traj)
+                self._set_initialcond_dyn(read_traj[-1])
+            self._until_r_or_p(i, lentraj)
             self._write_checkpoint()
         for i in range(self.n_rep):
             self.rep_weights[i].append(self.current_p / self.n_rep)
 
     def _read_checkpoint(self):
         """Read the necessary information to restart an AMS run from the checkpoint file"""
-        json_file = paropen(self.progress_dir + "/ams_checkpoint.txt", "r")
+        json_file = paropen(self.ams_dir + "/ams_checkpoint.txt", "r")
         checkpoint_data = json.load(json_file)
         json_file.close()
         self.z_maxs = checkpoint_data["z_maxs"]
@@ -306,31 +271,38 @@ class AMS:
     def _write_checkpoint(self):
         """Write information on the current state of AMS run to be able to restart"""
         checkpoint_data = {"z_maxs": self.z_maxs, "iteration_number": self.ams_it, "initialized": self.initialized, "finished": self.finished, "success": self.success, "rep_weights": self.rep_weights, "z_kill": self.z_kill, "killed": self.killed, "current_p": self.current_p}
-        json_file = paropen(self.progress_dir + "/ams_checkpoint.txt", "w")
+        json_file = paropen(self.ams_dir + "/ams_checkpoint.txt", "w")
         json.dump(checkpoint_data, json_file, indent=4)
         json_file.close()
 
-    def run(self):
+    def run(self, max_iter=-1):
         """Run AMS, should handle the restarts correctly"""
-        if os.path.exists(self.progress_dir + "/ams_checkpoint.txt"):
+        if os.path.exists(self.ams_dir + "/ams_checkpoint.txt"):
             if self.verbose:
                 parprint("Read checkpoint")
             self._read_checkpoint()
         barrier()  # Wait for all threads to read checkpoint
         if not self.initialized:
-            self.dyn.observers = []
+            # self.dyn.observers = []
             self._initialize()
         if self.verbose:
             parprint("Initialisation done")
-        if os.path.exists(self.progress_dir + "/ams_checkpoint.txt") and self.initialized and not self.finished and self.dyn.nsteps == 1:
-            self.dyn.observers = []
+        if os.path.exists(self.ams_dir + "/ams_checkpoint.txt") and self.initialized and not self.finished and self.dyn.nsteps == 1:
+            # self.dyn.observers = []
             self._finish_iteration()
         continue_running = True
-        with paropen(self.progress_dir + "/ams_progress.txt", "a") as progress_file:
+        with paropen(self.ams_dir + "/ams_progress.txt", "a") as progress_file:
+            np.savetxt(progress_file, np.hstack(([self.ams_it, self.current_p, np.min(self.z_maxs), np.max(self.z_maxs)], self.z_maxs))[None, :])
             while continue_running:
                 if self.verbose:
                     parprint("AMS iteration:", self.ams_it)
-                self.dyn.observers = []
+                # self.dyn.observers = []
                 continue_running = self._iteration()
-                np.savetxt(progress_file, np.hstack(([self.ams_it, self.current_p], self.z_maxs))[None, :])
                 self.ams_it += 1
+                if continue_running:
+                    np.savetxt(progress_file, np.hstack(([self.ams_it, self.current_p, np.min(self.z_maxs), np.max(self.z_maxs)], self.z_maxs))[None, :])
+                if max_iter > 0 and self.ams_it >= max_iter:
+                    self.finished = True
+                    self.success = False
+                    self._write_checkpoint()
+                    break
