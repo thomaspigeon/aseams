@@ -173,7 +173,7 @@ class CollectiveVariables:
                 self.sigma_r_level = []
                 for i in range(len(self.cv_r)):
                     if self.r_crit[i] == "above":
-                        if not (isinstance(sigma_r_level[i], float) and sigma_r_level[i] > self.in_r_boundary[i]):
+                        if not (isinstance(sigma_r_level[i], float) and sigma_r_level[i] <= self.in_r_boundary[i]):
                             raise ValueError(
                                 """When cv_r is a list of functions and r_crit[i] is "above",
                                                 sigma_r_level[i] must be a float smaller than in_r_boundary[i]"""
@@ -181,7 +181,7 @@ class CollectiveVariables:
                         else:
                             self.sigma_r_level.append(sigma_r_level[i])
                     elif self.r_crit[i] == "below":
-                        if not (isinstance(sigma_r_level[i], float) and sigma_r_level[i] < self.in_r_boundary[i]):
+                        if not (isinstance(sigma_r_level[i], float) and sigma_r_level[i] >= self.in_r_boundary[i]):
                             raise ValueError(
                                 """When cv_r is a list of functions and r_crit[i] is "above",
                                                 sigma_r_level[i] must be a float greater than in_r_boundary[i]"""
@@ -250,7 +250,7 @@ class CollectiveVariables:
                 self.out_of_r_zone = []
                 for i in range(len(self.cv_r)):
                     if self.r_crit[i] == "above":
-                        if not (isinstance(out_of_r_zone[i], float) and out_of_r_zone[i] > self.sigma_r_level[i]):
+                        if not (isinstance(out_of_r_zone[i], float) and out_of_r_zone[i] <= self.sigma_r_level[i]):
                             raise ValueError(
                                 """When cv_r is a list of functions and r_crit[i] is "above",
                                                 out_of_r_zone[i] must be a float smaller than sigma_r_level[i]"""
@@ -258,7 +258,7 @@ class CollectiveVariables:
                         else:
                             self.out_of_r_zone.append(out_of_r_zone[i])
                     elif self.r_crit[i] == "below":
-                        if not (isinstance(out_of_r_zone[i], float) and out_of_r_zone[i] < self.sigma_r_level[i]):
+                        if not (isinstance(out_of_r_zone[i], float) and out_of_r_zone[i] >= self.sigma_r_level[i]):
                             raise ValueError(
                                 """When cv_r is a list of functions and r_crit[i] is "above",
                                                 out_of_r_zone[i] must be a float greater than sigma_r_level[i]"""
@@ -289,11 +289,11 @@ class CollectiveVariables:
         if isinstance(self.cv_r, list):
             in_r = []
             for i in range(len(self.cv_r)):
-                if self.r_crit == "above":
+                if self.r_crit[i] == "above":
                     in_r.append(self.cv_r[i](atoms) >= self.in_r_boundary[i])
-                if self.r_crit == "below":
+                if self.r_crit[i] == "below":
                     in_r.append(self.cv_r[i](atoms) <= self.in_r_boundary[i])
-                if self.r_crit == "between":
+                if self.r_crit[i] == "between":
                     in_r.append(self.in_r_boundary[i][0] <= self.cv_r[i](atoms) <= self.in_r_boundary[i][1])
             return in_r
         else:
@@ -331,11 +331,11 @@ class CollectiveVariables:
         if isinstance(self.cv_r, list):
             above_sigma_r = []
             for i in range(len(self.cv_r)):
-                if self.r_crit == "above":
+                if self.r_crit[i] == "above":
                     above_sigma_r.append(self.cv_r[i](atoms) < self.sigma_r_level[i])
-                if self.r_crit == "below":
+                if self.r_crit[i] == "below":
                     above_sigma_r.append(self.cv_r[i](atoms) > self.sigma_r_level[i])
-                if self.r_crit == "between":
+                if self.r_crit[i] == "between":
                     above_sigma_r.append(self.cv_r[i](atoms) < self.sigma_r_level[i][0] or self.cv_r[i](atoms) > self.sigma_r_level[i][1])
             return above_sigma_r
         else:
@@ -363,11 +363,11 @@ class CollectiveVariables:
         if isinstance(self.cv_r, list):
             out = []
             for i in range(len(self.cv_r)):
-                if self.r_crit == "above":
+                if self.r_crit[i] == "above":
                     out.append(self.cv_r[i](atoms) < self.out_of_r_zone[i])
-                if self.r_crit == "below":
+                if self.r_crit[i] == "below":
                     out.append(self.cv_r[i](atoms) > self.out_of_r_zone[i])
-                if self.r_crit == "between":
+                if self.r_crit[i] == "between":
                     out.append(self.cv_r[i](atoms) < self.out_of_r_zone[i][0] or self.cv_r[i](atoms) > self.out_of_r_zone[i][1])
             return np.prod(out)
         else:
@@ -408,7 +408,7 @@ class CollectiveVariables:
                                             "above", "between" or "below"."""
                         )
                     else:
-                        self.r_crit.append(p_crit[i])
+                        self.p_crit.append(p_crit[i])
 
     def set_in_p_boundary(self, in_p_boundary):
         """Set the numerical value of the boundary to indentify whether a structure is in P state.
@@ -480,11 +480,11 @@ class CollectiveVariables:
         if isinstance(self.cv_p, list):
             in_p = []
             for i in range(len(self.cv_p)):
-                if self.p_crit == "above":
+                if self.p_crit[i] == "above":
                     in_p.append(self.cv_p[i](atoms) >= self.in_p_boundary[i])
-                if self.p_crit == "below":
+                if self.p_crit[i] == "below":
                     in_p.append(self.cv_p[i](atoms) <= self.in_p_boundary[i])
-                if self.r_crit == "between":
+                if self.r_crit[i] == "between":
                     in_p.append(self.in_p_boundary[i][0] <= self.cv_p[i](atoms) <= self.in_p_boundary[i][1])
             return in_p
         else:

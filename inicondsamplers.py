@@ -254,12 +254,12 @@ class FlemmingViotInitialConditionsSampler:
     def set_run_dir(self, run_dir="./ini_conds_walker_"):
         """Where the md logs will be written, if the directory does not exist, it will create it."""
         self.run_dir = run_dir
-        if not os.path.exists(self.run_dir) and world.rank == 0:
-            os.mkdir(self.run_dir)
+        if not os.path.exists(self.run_dir + str(self.w_i)) and world.rank == 0:
+            os.mkdir(self.run_dir + str(self.w_i))
         n_traj_already = len([fi for fi in os.listdir(self.run_dir + str(self.w_i)) if fi.endswith(".traj")])
         t = []
         for i in range(n_traj_already):
-            trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(n_traj_already)
+            trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(i)
             list_atoms = read(trajfile, index=":")
             if i == 0:
                 t.append(len(list_atoms))
