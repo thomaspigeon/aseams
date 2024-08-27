@@ -1,7 +1,7 @@
 import numpy as np
 import os, shutil, time
 from ase.io import Trajectory, read, write
-from ase.parallel import world
+from ase.parallel import world, paropen 
 
 
 
@@ -251,6 +251,13 @@ class FlemmingViotInitialConditionsSampler:
         self.run_dir = None
         self.ini_cond_dir = None
 
+    def _set_initialcond_dyn(self, atoms):
+        """
+        Set atomic position and momenta of a dynamic
+        """
+        self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
+        self.dyn.atoms.set_momenta(atoms.get_momenta())
+
     def set_run_dir(self, run_dir="./ini_conds_walker_"):
         """Where the md logs will be written, if the directory does not exist, it will create it."""
         self.run_dir = run_dir
@@ -265,6 +272,8 @@ class FlemmingViotInitialConditionsSampler:
                 t.append(len(list_atoms))
             else:
                 t.append(len(list_atoms) + t[-1])
+            if i == n_traj_already - 1:
+                self._set_initialcond_dyn(list_atoms[-1])
         if len(t) > 0:
             self.dyn.nsteps = t[-1]
         trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(n_traj_already)
@@ -274,8 +283,42 @@ class FlemmingViotInitialConditionsSampler:
     def set_ini_cond_dir(self, ini_cond_dir="./ini_conds"):
         """Where the initial conditions for AMS will be written, if the directory does not exist, it will create it."""
         self.ini_cond_dir = ini_cond_dir
-        if not os.path.exists(self.ini_cond_dir) and world.rank == 0:
+        if not os.path.exists(self.ini_cond_dir) and world.rank == 0 and self.w_i == 0:
             os.mkdir(self.ini_cond_dir)
+
+    def _branch_FV_paricle(self):
+        traj_idx = None
+        branch_rep_number = np.random.choice(np.setdiff1d(np.arange(self.n_walkers), self.w_i))
+        while traj_idx is None:
+            n_traj_already = len([fi for fi in os.listdir(self.run_dir + str(branch_rep_number)) if fi.endswith(".traj")])
+            t = []
+            for i in range(n_traj_already):
+                trajfile = self.run_dir + str(branch_rep_number) + "/md_traj_{}.traj".format(i)
+                list_atoms = read(trajfile, index=":")
+                if i == 0:
+                    t.append(len(list_atoms))
+                    if self.dyn.nsteps < t[-1]:
+                        traj_idx = i
+                else:
+                    t.append(len(list_atoms) + t[-1])
+                    if t[-2] <= self.dyn.nsteps < t[-1]:
+                        traj_idx = i
+                f = paropen(self.run_dir + str(self.w_i) + "/FV_history.txt", "a")
+                f.write("Attempt branching replica " + str(self.w_i) + " from replica index: " + str(branch_rep_number) + " at time " + str(self.dyn.nsteps) + " \n")
+                if traj_idx is not None:
+                    f.write("Succesful branching\n \n")
+                    f.close()
+                else:
+                    f.write("Cannot branch as replica " + str(branch_rep_number) + "  did not reach time " + str(self.dyn.nsteps) + "\n")
+                    f.write("Going to sleep for 1 minute\n")
+                    f.close()
+                    time.sleep(60)
+        trajfile = self.run_dir + str(branch_rep_number) + "/md_traj_{}.traj".format(traj_idx)
+        list_atoms = read(trajfile, index=":")
+        at = list_atoms[self.dyn.nsteps - t[traj_idx - 1]]
+        self.dyn.atoms.set_scaled_positions(at.get_scaled_positions())
+        self.dyn.atoms.set_momenta(at.get_momenta())
+
 
     def sample(self, n_conditions=100, n_steps=None):
         """Sampling initial conditions
@@ -293,6 +336,8 @@ class FlemmingViotInitialConditionsSampler:
             raise ValueError("""The running directory is not set ! Call initialconditionssampler.set_run_dir""")
         if self.ini_cond_dir is None:
             raise ValueError("""The directory to store initial conditions is not defined ! Call initialconditionssampler.set_ini_cond_dir""")
+        while not os.path.exists(self.ini_cond_dir):
+            time.sleep(1)
         if n_steps is None:
             n_steps = -1
             if not isinstance(n_conditions, int) or n_conditions <= 0:
@@ -307,7 +352,7 @@ class FlemmingViotInitialConditionsSampler:
                                 int > 0 if n_conditions is set to None"""
             )
         n_cdt, n_stp = 0, 0
-        n_ini_conds_already = len([ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith(".extyxz")])
+        n_ini_conds_already = len([fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")]) 
         if isinstance(self.xi.cv_r, list):
             t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
             t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
@@ -317,6 +362,8 @@ class FlemmingViotInitialConditionsSampler:
         while not self.xi.in_r(self.dyn.atoms):
             self.dyn.run(self.cv_interval)
             n_stp += self.cv_interval
+            if self.xi.is_out_of_r_zone(self.dyn.atoms):
+                self._branch_FV_paricle()
         while n_cdt < n_conditions or n_stp < n_steps:
             which_r = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
             t_r_sigma[which_r].append(0)
@@ -325,34 +372,14 @@ class FlemmingViotInitialConditionsSampler:
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 t_r_sigma[which_r][-1] += self.cv_interval
-            fname = self.ini_cond_dir + "/" + str(n_ini_conds_already + n_cdt + 1) + ".extxyz"
+            fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(n_ini_conds_already + n_cdt + 1) + ".extxyz"
             write(fname, self.dyn.atoms)
             while not self.xi.in_r(self.dyn.atoms):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 t_sigma_r[which_r][-1] += self.cv_interval
                 if self.xi.is_out_of_r_zone(self.dyn.atoms):
-                    traj_idx = None
-                    while traj_idx is None:
-                        branch_rep_number = np.random.choice(np.setdiff1d(np.arange(self.n_walkers), self.w_i))
-                        n_traj_already = len(
-                            [fi for fi in os.listdir(self.run_dir + str(branch_rep_number)) if fi.endswith(".traj")])
-                        t = []
-                        for i in range(n_traj_already):
-                            trajfile = self.run_dir + str(branch_rep_number) + "/md_traj_{}.traj".format(n_traj_already)
-                            list_atoms = read(trajfile, index=":")
-                            if i == 0:
-                                t.append(len(list_atoms))
-                            else:
-                                t.append(len(list_atoms) + t[-1])
-                                if t[-2] <= self.dyn.nsteps < t[-1]:
-                                    traj_idx = i
-                        time.sleep(600)
-                    trajfile = self.run_dir + str(branch_rep_number) + "/md_traj_{}.traj".format(traj_idx)
-                    list_atoms = read(trajfile, index=":")
-                    at = list_atoms[self.dyn.nsteps - t[traj_idx - 1]]
-                    self.dyn.atoms.set_scaled_positions(at.get_scaled_positions())
-                    self.dyn.atoms.set_momenta(at.get_momenta())
+                    self._branch_FV_paricle()
             n_cdt += 1
         return t_r_sigma, t_sigma_r
 

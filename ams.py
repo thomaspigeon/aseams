@@ -185,7 +185,7 @@ class AMS:
             os.remove(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
         barrier()
         branched_rep_z = np.loadtxt(self.ams_dir + "/rc_rep_" + str(j) + ".txt")
-        branch_level = np.flatnonzero(branched_rep_z >= z_kill)[0]  # First occurence of branched_rep_z above z_kill
+        branch_level = np.flatnonzero(branched_rep_z > z_kill)[0]  # First occurence of branched_rep_z above z_kill
 
         # Save branched traj until current point included
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "w")
