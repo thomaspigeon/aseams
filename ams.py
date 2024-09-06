@@ -7,10 +7,23 @@ from ase.io.formats import UnknownFileTypeError
 from ase.parallel import parprint, paropen, world, barrier, broadcast
 
 
+class NumpyEncoder(json.JSONEncoder):
+    """Special json encoder for numpy types"""
+
+    def default(self, obj):
+        if isinstance(obj, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
+
 class AMS:
     """Running AMS"""
 
-    def __init__(self, n_rep, k_min, dyn, xi, cv_interval=1, rc_threshold=1.0e-3, save_all=False, verbose=False):
+    def __init__(self, n_rep, k_min, dyn, xi, cv_interval=1, rc_threshold=0.0, save_all=False, max_length_iter=np.infty, verbose=False):
         """
         Parameters:
 
@@ -33,6 +46,9 @@ class AMS:
 
         rc_threshold: float
             The biggest difference between two rc values so that they are considered identical.
+
+        max_length_iter : int
+            Maximum length of the trajectory for one iteration
 
         save_all: boolean
             whether all the trajectories of the replicas should be saved. If false, only the current state of the
@@ -78,6 +94,7 @@ class AMS:
         self.killed = []
         # self.calc = dyn.atoms.calc  # We should not event need to have it here I think.
         self.rc_threshold = rc_threshold
+        self.max_length_iter = max_length_iter
         self.verbose = verbose
 
     def set_ini_cond_dir(self, ini_cond_dir="./ini_conds"):
@@ -121,7 +138,7 @@ class AMS:
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
         if existing_steps == 0:
             f.write(str(z) + "\n")
-        while z > -np.infty and z < np.infty:
+        while (z > -np.infty and z < np.infty) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
             self.dyn.run(self.cv_interval)
             z = self._rc()
             f.write(str(z) + "\n")
@@ -146,6 +163,9 @@ class AMS:
                 read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
                 self._set_initialcond_dyn(read_traj[-1])
                 self._until_r_or_p(i, len(read_traj))
+                # Initialize weight if not already set
+                if len(self.rep_weights[i]) == 0:
+                    self.rep_weights[i].append(1 / self.n_rep)
                 self._write_checkpoint()
             except UnknownFileTypeError:  # If loading fail just reinitialize the replica
                 existing_reps.remove(i)
@@ -162,11 +182,13 @@ class AMS:
             if world.rank == 0:
                 filename, file_extension = os.path.splitext(ini_cond)
                 os.rename(self.ini_cond_dir + "/" + ini_cond, self.ini_cond_dir + "/" + filename + "_used" + file_extension)
+            # Initialize weight, either provided as a comment in the extxyz or set to default value
+            self.rep_weights[i].append(atoms.info.get("weight", 1.0) / self.n_rep)
             self._set_initialcond_dyn(atoms)
+            self._write_checkpoint()  # Save weight into checkpoint
             self._until_r_or_p(i, 0)
             self._write_checkpoint()
-        for i in range(self.n_rep):
-            self.rep_weights[i].append(1 / self.n_rep)
+
         self.initialized = True
         self._write_checkpoint()
 
@@ -179,7 +201,7 @@ class AMS:
             weights = {"weights": self.rep_weights[i]}
             json.dump(weights, json_file, indent=4)
             json_file.close()
-        self.rep_weights[i] = []
+        self.rep_weights[i] = [self.rep_weights[j][-1]]  # self.rep_weights[j].copy()  # ou alors [self.rep_weights[j][-1]] ?
         if world.rank == 0:
             os.remove(self.ams_dir + "/rep_" + str(i) + ".traj")
             os.remove(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
@@ -227,7 +249,8 @@ class AMS:
             self._until_r_or_p(i, len_branch)
             self._write_checkpoint()
         for i in range(self.n_rep):
-            self.rep_weights[i].append(self.current_p / self.n_rep)
+            # self.rep_weights[i].append(self.current_p / self.n_rep)
+            self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
         return True
 
     def _finish_iteration(self):
@@ -251,7 +274,19 @@ class AMS:
             self._until_r_or_p(i, lentraj)
             self._write_checkpoint()
         for i in range(self.n_rep):
-            self.rep_weights[i].append(self.current_p / self.n_rep)
+            # self.rep_weights[i].append(self.current_p / self.n_rep)
+            self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+
+    def p_ams(self):
+        p = 0
+        if not self.finished:
+            print("AMS not run")
+            return 0.0
+        for i in range(self.n_rep):
+            if self.z_maxs[i] >= np.infty:  # If in B
+                p += self.rep_weights[i][-1]
+
+        return p
 
     def _read_checkpoint(self):
         """Read the necessary information to restart an AMS run from the checkpoint file"""
@@ -272,7 +307,7 @@ class AMS:
         """Write information on the current state of AMS run to be able to restart"""
         checkpoint_data = {"z_maxs": self.z_maxs, "iteration_number": self.ams_it, "initialized": self.initialized, "finished": self.finished, "success": self.success, "rep_weights": self.rep_weights, "z_kill": self.z_kill, "killed": self.killed, "current_p": self.current_p}
         json_file = paropen(self.ams_dir + "/ams_checkpoint.txt", "w")
-        json.dump(checkpoint_data, json_file, indent=4)
+        json.dump(checkpoint_data, json_file, indent=4, cls=NumpyEncoder)
         json_file.close()
 
     def run(self, max_iter=-1):
@@ -290,7 +325,7 @@ class AMS:
         if os.path.exists(self.ams_dir + "/ams_checkpoint.txt") and self.initialized and not self.finished and self.dyn.nsteps == 1:
             # self.dyn.observers = []
             self._finish_iteration()
-        continue_running = True
+        continue_running = max_iter != 0
         with paropen(self.ams_dir + "/ams_progress.txt", "a") as progress_file:
             np.savetxt(progress_file, np.hstack(([self.ams_it, self.current_p, np.min(self.z_maxs), np.max(self.z_maxs)], self.z_maxs))[None, :])
             while continue_running:
@@ -305,4 +340,4 @@ class AMS:
                     self.finished = True
                     self.success = False
                     self._write_checkpoint()
-                    break
+                    continue_running = False
