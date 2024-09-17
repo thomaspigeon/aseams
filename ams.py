@@ -209,6 +209,8 @@ class AMS:
         branched_rep_z = np.loadtxt(self.ams_dir + "/rc_rep_" + str(j) + ".txt")
         branch_level = np.flatnonzero(branched_rep_z > z_kill)[0]  # First occurence of branched_rep_z above z_kill
 
+        # Update the z_max 
+        self.z_maxs[i] = np.max(branched_rep_z[: branch_level + 1])
         # Save branched traj until current point included
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "w")
         np.savetxt(f, branched_rep_z[: branch_level + 1])
