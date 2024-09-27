@@ -1,8 +1,7 @@
 import numpy as np
 import os, shutil, time
 from ase.io import Trajectory, read, write
-from ase.parallel import world, paropen 
-
+from ase.parallel import world, paropen
 
 
 class InitialConditionsSampler:
@@ -35,7 +34,6 @@ class InitialConditionsSampler:
         self.xi = xi
         self.dyn = dyn
         self.dyn.nsteps = 1
-        self.calc = dyn.atoms.calc
         self.run_dir = None
         self.ini_cond_dir = None
 
@@ -247,7 +245,6 @@ class FlemmingViotInitialConditionsSampler:
         self.xi = xi
         self.dyn = dyn
         self.dyn.nsteps = 1
-        self.calc = dyn.atoms.calc
         self.run_dir = None
         self.ini_cond_dir = None
 
@@ -319,7 +316,6 @@ class FlemmingViotInitialConditionsSampler:
         self.dyn.atoms.set_scaled_positions(at.get_scaled_positions())
         self.dyn.atoms.set_momenta(at.get_momenta())
 
-
     def sample(self, n_conditions=100, n_steps=None):
         """Sampling initial conditions
 
@@ -352,7 +348,7 @@ class FlemmingViotInitialConditionsSampler:
                                 int > 0 if n_conditions is set to None"""
             )
         n_cdt, n_stp = 0, 0
-        n_ini_conds_already = len([fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")]) 
+        n_ini_conds_already = len([fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")])
         if isinstance(self.xi.cv_r, list):
             t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
             t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
@@ -372,7 +368,7 @@ class FlemmingViotInitialConditionsSampler:
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 t_r_sigma[which_r][-1] += self.cv_interval
-            fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(n_ini_conds_already + n_cdt + 1) + ".extxyz"
+            fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + "_ini_cond_" + str(n_ini_conds_already + n_cdt + 1) + ".extxyz"
             write(fname, self.dyn.atoms)
             while not self.xi.in_r(self.dyn.atoms):
                 self.dyn.run(self.cv_interval)
@@ -382,6 +378,3 @@ class FlemmingViotInitialConditionsSampler:
                     self._branch_FV_paricle()
             n_cdt += 1
         return t_r_sigma, t_sigma_r
-
-
-   

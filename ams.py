@@ -127,7 +127,7 @@ class AMS:
         """
         Set atomic position and momenta of a dynamic
         """
-        self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
+        self.dyn.atoms.set_positions(atoms.get_positions())
         self.dyn.atoms.set_momenta(atoms.get_momenta())
 
     def _until_r_or_p(self, i, existing_steps=0):
@@ -209,7 +209,7 @@ class AMS:
         branched_rep_z = np.loadtxt(self.ams_dir + "/rc_rep_" + str(j) + ".txt")
         branch_level = np.flatnonzero(branched_rep_z > z_kill)[0]  # First occurence of branched_rep_z above z_kill
 
-        # Update the z_max 
+        # Update the z_max
         self.z_maxs[i] = np.max(branched_rep_z[: branch_level + 1])
         # Save branched traj until current point included
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "w")
