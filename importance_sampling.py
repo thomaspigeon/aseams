@@ -5,6 +5,13 @@ from ase import units
 from ase.io import read, write
 from ase.parallel import world
 import json
+from statsmodels.nonparametric.kernel_regression import KernelReg
+
+
+def rc_vel(atoms, rc_grad):
+    grad, inclued_coords = rc_grad(atoms)
+    velocities = atoms.get_momenta() / atoms.get_masses()[:, np.newaxis]
+    return np.dot(grad.ravel(), velocities.ravel()[np.ravel_multi_index(inclued_coords, velocities.shape)])
 
 
 def bias_init_cond_velocity(rc_grad, ini_conds, ini_conds_biased, temp, bias_params, constraints=[]):
@@ -59,11 +66,11 @@ def rayleigh_bias(temp, bias_param, rng):
     """
     bias_temp = bias_param["bias_temp"]
     x = rng.rayleigh(scale=1.0)
-    weight = bias_temp / temp * np.exp(-0.5 * (x ** 2) * (bias_temp / temp - 1.0))  # Ratio of 2 Rayleigh PDF for importance sampling
+    weight = bias_temp / temp * np.exp(-0.5 * (x**2) * (bias_temp / temp - 1.0))  # Ratio of 2 Rayleigh PDF for importance sampling
     return x * np.sqrt(units.kB * bias_temp), weight, False
 
 
-def committor_estimation(ams_runs_paths, cv):
+def committor_estimation(ams_runs_paths, rc_grad):
     """
     Estimate committor from previous AMS runs
     Get a list of folder that contains
@@ -82,7 +89,7 @@ def committor_estimation(ams_runs_paths, cv):
         w_r = [w[-1] for w in checkpoint_data["rep_weights"]]
         n_reactives_files = len(z_maxs)
         for n in range(n_reactives_files):
-            vel = cv.rc_vel(read(data_ams + f"rep_{n}.traj", index="0"))
+            vel = rc_vel(read(data_ams + f"rep_{n}.traj", index="0"), rc_grad)
             vels.append(vel)
             weights.append(w_r[n])
             if z_maxs[n] >= np.infty:
@@ -93,7 +100,7 @@ def committor_estimation(ams_runs_paths, cv):
         # Then load non reaction trajectories
         nr_files = glob.glob(data_ams + "nr_rep_*.traj")
         for file in nr_files:
-            vel = cv.rc_vel(read(file, index="0"))
+            vel = rc_vel(read(file, index="0"), rc_grad)
             vels.append(vel)
             json_weightfile = open(file[:-5] + "_weights.txt", "r")
             weights_data = json.load(json_weightfile)
@@ -104,6 +111,8 @@ def committor_estimation(ams_runs_paths, cv):
         vels = np.asarray(vels)
         weights = np.asarray(weights)
         is_reactive = np.asarray(is_reactive)
+
+    print(vels.shape, weights.shape, is_reactive.shape)
 
     inds_for_sort = np.argsort(vels)
     uniques_vels, index_to_split = np.unique(vels[inds_for_sort], return_index=True)
@@ -116,10 +125,13 @@ def committor_estimation(ams_runs_paths, cv):
     return uniques_vels, committor_values
 
 
+# TODO: pour les 3 fonctions suivante, on doit retourner une fonction et il faut écrire une fonction qui sait sampler depuis cette fonction et calculer le poids
 def non_parametric_committor_estimation(v, comm):
     """
     Obtain a non-parametric estimation of the committor from data points
     """
+
+    model = KernelReg(comm, v, "c", "lc", bw=[bandwidth])
 
 
 def parametric_committor_estimation_tanh(v, comm):
