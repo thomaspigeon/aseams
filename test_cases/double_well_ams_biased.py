@@ -14,7 +14,7 @@ from ams import AMS
 from cvs import CollectiveVariables
 from inicondsamplers import InitialConditionsSampler
 
-from importance_sampling import rayleigh_bias_init_cond_velocity
+from importance_sampling import bias_init_cond_velocity
 from ase.parallel import parprint
 from ase.io import read
 import matplotlib.pyplot as plt
@@ -45,7 +45,7 @@ def grad_distance(atoms):
     """
     r = atoms.get_positions()[[1], :] - atoms.get_positions()[[0], :]
     grad_r = ase.geometry.get_distances_derivatives(r, cell=atoms.cell, pbc=atoms.pbc)
-    indices = [0,1]
+    indices = [0, 1]
     return grad_r.squeeze(), (np.repeat(indices, 3), np.tile([0, 1, 2], len(indices)))
 
 
@@ -74,7 +74,7 @@ for m, temp_bias in enumerate(bias_temps):
     res_ams = np.zeros(25)
     for n in range(len(res_ams)):
         parprint(f"AMS {n}")
-        rayleigh_bias_init_cond_velocity(grad_distance, "ini_conds_for_bias/", "ini_conds_biased/", temperature_K, temp_bias)
+        bias_init_cond_velocity(grad_distance, "ini_conds_for_bias/", "ini_conds_biased/", temperature_K, {"type": "rayleigh", "bias_temp": temp_bias}, constraints=[FixCom()])
         ams = AMS(n_rep=25, k_min=1, dyn=dyn, xi=cv, save_all=True, rc_threshold=1e-6, verbose=False)
         ams.set_ini_cond_dir("ini_conds_biased/")
         ams.set_ams_dir(f"AMS_bias_{n}/", clean=True)
