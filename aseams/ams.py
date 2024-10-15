@@ -50,7 +50,7 @@ class AMS:
         max_length_iter : int
             Maximum length of the trajectory for one iteration
 
-        save_all: boolean
+        save_all: boolean or string
             whether all the trajectories of the replicas should be saved. If false, only the current state of the
             replicas is written in the AMS.current_replicas_dir
         verbose: boolean
@@ -74,9 +74,24 @@ class AMS:
         else:
             raise ValueError("""cv_interval must be an int >= 0""")
         if isinstance(save_all, bool):
-            self.save_all = save_all
+            if save_all:
+                self.save_all = "all"
+            else:
+                self.save_all = "no"
+        elif isinstance(save_all, str):
+            if save_all.lower() in [
+                "all",
+                "a",
+            ]:
+                self.save_all = "all"
+            elif save_all.lower() in ["first", "f"]:  # Only save first point of non reactive trajectories
+                self.save_all = "first"
+            elif save_all.lower() in ["both", "b"]:  # Only save first  and last point of non reactive trajectories
+                self.save_all = "both"
+            else:
+                raise ValueError("""save_all is not all or no or first""")
         else:
-            raise ValueError("""save_all must be a boolean""")
+            raise ValueError("""save_all must be a boolean or a string""")
         xi.test_the_collective_variables(dyn.atoms)
         self.success = False
         self.initialized = False
@@ -194,8 +209,14 @@ class AMS:
 
     def _branch_replica(self, i, j, z_kill):
         """Branch replica i by copying replica j until z_kill and run the dynamics until it reaches either R or P"""
-        if self.save_all and world.rank == 0:
-            os.system("cp " + self.ams_dir + "/rep_" + str(i) + ".traj " + self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj")
+        if world.rank == 0:
+            if self.save_all != "no":
+                if self.save_all == "all":
+                    os.system("cp " + self.ams_dir + "/rep_" + str(i) + ".traj " + self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj")
+                elif self.save_all == "first":
+                    write(self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj", [read(self.ams_dir + "/rep_" + str(i) + ".traj", index="0")])
+                elif self.save_all == "both":
+                    write(self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj", [read(self.ams_dir + "/rep_" + str(i) + ".traj", index="0"), read(self.ams_dir + "/rep_" + str(i) + ".traj", index="-1")])
             os.system("cp " + self.ams_dir + "/rc_rep_" + str(i) + ".txt " + self.ams_dir + "/nr_rc_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".txt")
             json_file = paropen(self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + "_weights.txt", "w")
             weights = {"weights": self.rep_weights[i]}
