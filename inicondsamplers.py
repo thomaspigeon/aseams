@@ -1,8 +1,9 @@
 import numpy as np
 import os, shutil, time
 from ase.io import Trajectory, read, write
-from ase.parallel import world, paropen 
-
+from ase.parallel import world, paropen, barrier
+from ams import NumpyEncoder
+import json
 
 
 class InitialConditionsSampler:
@@ -246,10 +247,17 @@ class FlemmingViotInitialConditionsSampler:
         xi.test_the_collective_variables(dyn.atoms)
         self.xi = xi
         self.dyn = dyn
-        self.dyn.nsteps = 1
         self.calc = dyn.atoms.calc
         self.run_dir = None
         self.ini_cond_dir = None
+        self.t_sigma_r = None
+        self.t_r_sigma = None
+        self.first_in_r = False
+        self.going_to_sigma = True
+        self.going_back_to_r = False
+        self.last_r_visited = None
+        self.t_r_sigma_out = None
+        self.t_sigma_out = None
 
     def _set_initialcond_dyn(self, atoms):
         """
@@ -257,6 +265,50 @@ class FlemmingViotInitialConditionsSampler:
         """
         self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
         self.dyn.atoms.set_momenta(atoms.get_momenta())
+
+    def _write_checkpoint(self):
+        """write checkpoint data for step by step run"""
+        checkpoint_data = {"run_dir": self.run_dir,
+                           "ini_cond_dir": self.ini_cond_dir,
+                           "nsteps": self.dyn.nsteps,
+                           "n_walkers": self.n_walkers,
+                           "w_i": self.w_i,
+                           "cv_interval": self.cv_interval,
+                           "first_in_r": self.first_in_r,
+                           "last_r_visited": self.last_r_visited,
+                           "going_to_sigma": self.going_to_sigma,
+                           "going_back_to_r": self.going_back_to_r,
+                           "t_sigma_r": self.t_sigma_r,
+                           "t_r_sigma": self.t_r_sigma,
+                           "t_sigma_out": self.t_sigma_out,
+                           "t_r_sigma_out": self.t_r_sigma_out}
+        json_file = paropen(self.run_dir + "/ini_fv_" + str(self.w_i) + "_checkpoint.txt", "w")
+        json.dump(checkpoint_data, json_file, indent=4, cls=NumpyEncoder)
+        json_file.close()
+
+    def _read_checkpoint(self):
+        """Read the necessary information to restart sampler from the checkpoint file"""
+        json_file = paropen(self.run_dir + "/ini_fv_" + str(self.w_i) + "_checkpoint.txt", "r")
+        checkpoint_data = json.load(json_file)
+        json_file.close()
+        self.run_dir = checkpoint_data["run_dir"]
+        self.ini_cond_dir = checkpoint_data["ini_cond_dir"]
+        self.dyn.nsteps = checkpoint_data["nsteps"]
+        self.n_walkers = checkpoint_data["n_walkers"]
+        self.w_i = checkpoint_data["w_i"]
+        self.cv_interval = checkpoint_data["cv_interval"]
+        self.t_sigma_r = checkpoint_data["t_sigma_r"]
+        self.t_r_sigma = checkpoint_data["t_r_sigma"]
+        self.t_sigma_out = checkpoint_data["t_sigma_out"]
+        self.t_r_sigma_out = checkpoint_data["t_r_sigma_out"]
+        self.first_in_r = checkpoint_data["first_in_r"]
+        self.going_to_sigma = checkpoint_data["going_to_sigma"]
+        self.going_back_to_r = checkpoint_data["going_back_to_r"]
+        self.last_r_visited = checkpoint_data["last_r_visited"]
+
+    def _write_current_atoms(self):
+        write("current_atoms.xyz", self.dyn.atoms, format="extxyz")
+        write("POSCAR", self.dyn.atoms, format="vasp")
 
     def set_run_dir(self, run_dir="./ini_conds_walker_"):
         """Where the md logs will be written, if the directory does not exist, it will create it."""
@@ -274,8 +326,7 @@ class FlemmingViotInitialConditionsSampler:
                 t.append(len(list_atoms) + t[-1])
             if i == n_traj_already - 1:
                 self._set_initialcond_dyn(list_atoms[-1])
-        if len(t) > 0:
-            self.dyn.nsteps = t[-1]
+        self.dyn.nsteps = t[-1]
         trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(n_traj_already)
         traj = Trajectory(filename=trajfile, mode="a", atoms=self.dyn.atoms)
         self.dyn.attach(traj.write, interval=self.cv_interval)
@@ -286,7 +337,7 @@ class FlemmingViotInitialConditionsSampler:
         if not os.path.exists(self.ini_cond_dir) and world.rank == 0 and self.w_i == 0:
             os.mkdir(self.ini_cond_dir)
 
-    def _branch_FV_paricle(self):
+    def _branch_fv_paricle(self):
         traj_idx = None
         branch_rep_number = np.random.choice(np.setdiff1d(np.arange(self.n_walkers), self.w_i))
         while traj_idx is None:
@@ -315,10 +366,13 @@ class FlemmingViotInitialConditionsSampler:
                     time.sleep(60)
         trajfile = self.run_dir + str(branch_rep_number) + "/md_traj_{}.traj".format(traj_idx)
         list_atoms = read(trajfile, index=":")
-        at = list_atoms[self.dyn.nsteps - t[traj_idx - 1]]
-        self.dyn.atoms.set_scaled_positions(at.get_scaled_positions())
-        self.dyn.atoms.set_momenta(at.get_momenta())
-
+        atoms = list_atoms[self.dyn.nsteps - t[traj_idx - 1]]
+        self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
+        self.dyn.atoms.set_momenta(atoms.get_momenta())
+        self.dyn.atoms.calc.results['forces'] = atoms.get_forces()
+        self.dyn.atoms.calc.results['stress'] = atoms.get_stress()
+        self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()
+        self.dyn.atoms.calc.results['free_energy'] = atoms.get_potential_energy()
 
     def sample(self, n_conditions=100, n_steps=None):
         """Sampling initial conditions
@@ -352,36 +406,145 @@ class FlemmingViotInitialConditionsSampler:
                                 int > 0 if n_conditions is set to None"""
             )
         n_cdt, n_stp = 0, 0
-        n_ini_conds_already = len([fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")]) 
+        n_ini_conds_already = len([fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")])
         if isinstance(self.xi.cv_r, list):
-            t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
-            t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
+            if self.t_r_sigma is None:
+                self.t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
+                self.t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
+                self.t_r_sigma_out = [[] for i in range(len(self.xi.cv_r))]
+                self.t_sigma_out = [[] for i in range(len(self.xi.cv_r))]
         else:
-            t_r_sigma = [[]]
-            t_sigma_r = [[]]
-        while not self.xi.in_r(self.dyn.atoms):
+            if self.t_r_sigma is None:
+                self.t_r_sigma = [[]]
+                self.t_sigma_r = [[]]
+                self.t_r_sigma_out = [[]]
+                self.t_sigma_out = [[]]
+        while not self.first_in_r:
             self.dyn.run(self.cv_interval)
             n_stp += self.cv_interval
             if self.xi.is_out_of_r_zone(self.dyn.atoms):
-                self._branch_FV_paricle()
+                self._branch_fv_paricle()
+                self.first_in_r = False
+            if self.xi.in_r(self.dyn.atoms):
+                self.first_in_r = True
         while n_cdt < n_conditions or n_stp < n_steps:
             which_r = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
-            t_r_sigma[which_r].append(0)
-            t_sigma_r[which_r].append(0)
+            self.t_r_sigma[which_r].append(0)
+            self.t_sigma_r[which_r].append(0)
             while not self.xi.above_sigma(self.dyn.atoms):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
-                t_r_sigma[which_r][-1] += self.cv_interval
+                self.t_r_sigma[which_r][-1] += self.cv_interval
             fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(n_ini_conds_already + n_cdt + 1) + ".extxyz"
             write(fname, self.dyn.atoms)
             while not self.xi.in_r(self.dyn.atoms):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
-                t_sigma_r[which_r][-1] += self.cv_interval
+                if self.first_in_r:
+                    self.t_sigma_r[which_r][-1] += self.cv_interval
                 if self.xi.is_out_of_r_zone(self.dyn.atoms):
-                    self._branch_FV_paricle()
+                    self._branch_fv_paricle()
+                    self.first_in_r = False
+                    self.t_sigma_out.apend(self.t_sigma_r[which_r].pop(-1))
+                    self.t_r_sigma_out.append(self.t_r_sigma[which_r].pop(-1))
+                if self.xi.in_r(self.dyn.atoms):
+                    self.first_in_r = True
             n_cdt += 1
-        return t_r_sigma, t_sigma_r
 
-
-   
+    def sample_step_by_step(self, forces, energy, stress):
+        """Run sampling of ini-conds calling this function steps by steps"""
+        if os.path.exists(self.run_dir + "/ini_fv_" + str(self.w_i) + "_checkpoint.txt"):
+            self._read_checkpoint()
+        barrier()
+        self.set_run_dir()
+        if self.dyn.nsteps > 0:
+            self.dyn.atoms.calc.results['forces'] = forces
+            self.dyn.atoms.calc.results['stress'] = stress
+            self.dyn.atoms.calc.results['energy'] = energy
+            self.dyn.atoms.calc.results['free_energy'] = energy
+            self.dyn._2nd_half_step(forces)
+        else:
+            self.dyn.call_observers()
+            if isinstance(self.xi.cv_r, list):
+                self.t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
+                self.t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
+                self.t_r_sigma_out = [[] for i in range(len(self.xi.cv_r))]
+                self.t_sigma_out = [[] for i in range(len(self.xi.cv_r))]
+            else:
+                self.t_r_sigma = [[]]
+                self.t_sigma_r = [[]]
+                self.t_r_sigma_out = [[]]
+                self.t_sigma_out = [[]]
+        in_r = self.xi.in_r(self.dyn.atoms)
+        if in_r:
+            which_r = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
+            self.last_r_visited = which_r
+        out_of_r_zone = self.xi.is_out_of_r_zone(self.dyn.atoms)
+        above_sigma = self.xi.above_sigma(self.dyn.atoms)
+        if self.first_in_r:
+            if self.going_to_sigma:
+                self.t_r_sigma[self.last_r_visited][-1] += 1
+            if self.going_back_to_r:
+                self.t_sigma_r[self.last_r_visited][-1] += 1
+            if above_sigma and self.going_to_sigma:
+                self.going_to_sigma = False
+                n_ini_conds_already = len(
+                    [fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")])
+                fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(
+                    n_ini_conds_already + 1) + ".extxyz"
+                write(fname, self.dyn.atoms)
+                self.going_back_to_r = True
+            if in_r and self.going_back_to_r:
+                self.going_back_to_r = False
+                self.t_r_sigma[self.last_r_visited].append(0)
+                self.t_sigma_r[self.last_r_visited].append(0)
+                self.going_to_sigma = True
+            if out_of_r_zone:
+                self._branch_fv_paricle()
+                self.dyn.call_observers()
+                self.dyn._1st_half_step(self.dyn.atoms.calc.results['forces'])
+                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results['free_energy'] = np.zeros_like(energy)
+                self.first_in_r = False
+                self.t_sigma_out.append(self.t_sigma_r[self.last_r_visited].pop(-1))
+                self.t_r_sigma_out.append(self.t_r_sigma[self.last_r_visited].pop(-1))
+                self._write_checkpoint()
+                self._write_current_atoms()
+                return False, True
+            else:
+                self.dyn._1st_half_step(forces)
+                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results['free_energy'] = np.zeros_like(energy)
+                self._write_checkpoint()
+                self._write_current_atoms()
+                return False, False
+        else:
+            if in_r:
+                self.first_in_r = True
+                self.t_r_sigma[self.last_r_visited].append(0)
+                self.t_sigma_r[self.last_r_visited].append(0)
+            if out_of_r_zone:
+                self._branch_FV_paricle()
+                self.dyn.call_observers()
+                self.dyn._1st_half_step(self.dyn.atoms.calc.results['forces'])
+                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results['free_energy'] = np.zeros_like(energy)
+                self.first_in_r = False
+                self._write_checkpoint()
+                self._write_current_atoms()
+                return False, True
+            else:
+                self.dyn._1st_half_step(forces)
+                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results['free_energy'] = np.zeros_like(energy)
+                self._write_checkpoint()
+                self._write_current_atoms()
+                return False, False

@@ -88,7 +88,10 @@ class AMS:
         self.ams_dir = None
         self.z_maxs = None
         self.ams_it = 0
-        self.current_p = 1
+        self.remaining_killed = []
+        self.alive = []
+        self.current_rep = None
+        self.current_p = None
         self.rep_weights = [[] for i in range(n_rep)]
         self.z_kill = []
         self.killed = []
@@ -129,6 +132,10 @@ class AMS:
         """
         self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
         self.dyn.atoms.set_momenta(atoms.get_momenta())
+        self.dyn.atoms.calc.results['forces'] = atoms.get_forces()
+        self.dyn.atoms.calc.results['stress'] = atoms.get_stress()
+        self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()
+        self.dyn.atoms.calc.results['free_energy'] = atoms.get_potential_energy()
 
     def _until_r_or_p(self, i, existing_steps=0):
         traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
@@ -148,6 +155,23 @@ class AMS:
         self.dyn.close()
         self.dyn.observers.pop(-1)
 
+    def _pick_ini_cond(self, rep_index):
+        if world.rank == 0:
+            ini_cond = np.random.choice(
+                [ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini and ini.endswith(".extxyz")])
+        else:
+            ini_cond = None
+        ini_cond = broadcast(ini_cond)
+        atoms = read(self.ini_cond_dir + "/" + ini_cond, index=0)
+        barrier()  # Wait for all mpi process to have read the file before moving it
+        if world.rank == 0:
+            filename, file_extension = os.path.splitext(ini_cond)
+            os.rename(self.ini_cond_dir + "/" + ini_cond, self.ini_cond_dir + "/" + filename + "_used" + file_extension)
+        # Initialize weight, either provided as a comment in the extxyz or set to default value
+        self.rep_weights[rep_index].append(atoms.info.get("weight", 1.0) / self.n_rep)
+        self._set_initialcond_dyn(atoms)
+        self._write_checkpoint()  # Save weight into checkpoint
+
     def _initialize(self):
         """Run the N_rep replicas from the initial condition until it enters either R or P"""
         if self.ini_cond_dir is None:
@@ -163,32 +187,18 @@ class AMS:
                 read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
                 self._set_initialcond_dyn(read_traj[-1])
                 self._until_r_or_p(i, len(read_traj))
-                # Initialize weight if not already set
-                if len(self.rep_weights[i]) == 0:
-                    self.rep_weights[i].append(1 / self.n_rep)
                 self._write_checkpoint()
             except UnknownFileTypeError:  # If loading fail just reinitialize the replica
                 existing_reps.remove(i)
 
         to_initialize_rep = np.setdiff1d(np.arange(self.n_rep), existing_reps)
         for i in to_initialize_rep:
-            if world.rank == 0:
-                ini_cond = np.random.choice([ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini and ini.endswith(".extxyz")])
-            else:
-                ini_cond = None
-            ini_cond = broadcast(ini_cond)
-            atoms = read(self.ini_cond_dir + "/" + ini_cond, index=0)
-            barrier()  # Wait for all mpi process to have read the file before moving it
-            if world.rank == 0:
-                filename, file_extension = os.path.splitext(ini_cond)
-                os.rename(self.ini_cond_dir + "/" + ini_cond, self.ini_cond_dir + "/" + filename + "_used" + file_extension)
-            # Initialize weight, either provided as a comment in the extxyz or set to default value
-            self.rep_weights[i].append(atoms.info.get("weight", 1.0) / self.n_rep)
-            self._set_initialcond_dyn(atoms)
-            self._write_checkpoint()  # Save weight into checkpoint
+            self._pick_ini_cond(rep_index=i)
             self._until_r_or_p(i, 0)
             self._write_checkpoint()
-
+        self.current_p = 0
+        for i in range(self.n_rep):
+            self.current_p += self.rep_weights[i][-1]
         self.initialized = True
         self._write_checkpoint()
 
@@ -213,14 +223,23 @@ class AMS:
         self.z_maxs[i] = np.max(branched_rep_z[: branch_level + 1])
         # Save branched traj until current point included
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "w")
-        np.savetxt(f, branched_rep_z[: branch_level + 1])
+        np.savetxt(f, branched_rep_z[: branch_level])
         f.close()
 
         read_traj = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
-        write(self.ams_dir + "/rep_" + str(i) + ".traj", read_traj[: branch_level + 1])
+        write(self.ams_dir + "/rep_" + str(i) + ".traj", read_traj[: branch_level])
 
         self._set_initialcond_dyn(read_traj[branch_level])
         return branch_level + 1
+
+    def _kill_reps(self):
+        z_maxs_np = np.asarray(self.z_maxs)
+        self.z_kill.append(np.sort(z_maxs_np[z_maxs_np > -np.infty])[self.k_min - 1]) # Ensure to take z_kill above infinity
+        killed = np.flatnonzero(z_maxs_np - self.z_kill[-1] <= self.rc_threshold)
+        self.killed.append(killed.tolist())
+        alive = np.setdiff1d(np.arange(self.n_rep), killed)
+        self._write_checkpoint()
+        return killed, alive
 
     def _iteration(self):
         """Perform one iteration of the AMS algorithm"""
@@ -229,17 +248,11 @@ class AMS:
             self.success = True
             self._write_checkpoint()
             return False
-        z_maxs_np = np.asarray(self.z_maxs)
-        z_kill = np.sort(z_maxs_np[z_maxs_np > -np.infty])[self.k_min - 1]  # Ensure to take z_kill above infinity
-        self.z_kill.append(z_kill)
-        killed = np.flatnonzero(z_maxs_np - z_kill <= self.rc_threshold)
-        self.killed.append(killed.tolist())
-        alive = np.setdiff1d(np.arange(self.n_rep), killed)
-        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
-        self._write_checkpoint()
+        killed, alive = self._kill_reps()
         if len(killed) == self.n_rep:
             self.finished = True
             self.success = False
+            self._write_checkpoint()
             return False
         for i in killed:
             if world.rank == 0:
@@ -247,12 +260,14 @@ class AMS:
             else:
                 j = None
             j = broadcast(j)
-            len_branch = self._branch_replica(i, j, z_kill)
-            self._until_r_or_p(i, len_branch)
+            #len_branch = self._branch_replica(i, j, self.z_kill[-1])
+            _ = self._branch_replica(i, j, self.z_kill[-1])
+            self._until_r_or_p(i, 0) #always write the branching position via the first step of the dyn.run
             self._write_checkpoint()
+        # update probability and weights
         for i in range(self.n_rep):
-            # self.rep_weights[i].append(self.current_p / self.n_rep)
             self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
         return True
 
     def _finish_iteration(self):
@@ -275,9 +290,10 @@ class AMS:
                 self._set_initialcond_dyn(read_traj[-1])
             self._until_r_or_p(i, lentraj)
             self._write_checkpoint()
+        # update probability and weights
         for i in range(self.n_rep):
-            # self.rep_weights[i].append(self.current_p / self.n_rep)
             self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
 
     def p_ams(self):
         p = 0
@@ -287,7 +303,6 @@ class AMS:
         for i in range(self.n_rep):
             if self.z_maxs[i] >= np.infty:  # If in B
                 p += self.rep_weights[i][-1]
-
         return p
 
     def _read_checkpoint(self):
@@ -304,13 +319,33 @@ class AMS:
         self.z_kill = checkpoint_data["z_kill"]
         self.killed = checkpoint_data["killed"]
         self.current_p = checkpoint_data["current_p"]
+        self.current_rep = checkpoint_data["current_rep"]
+        self.dyn.nsteps = checkpoint_data["current_step"]
+        self.remaining_killed = checkpoint_data["remaining_killed"]
+        self.alive = checkpoint_data["alive"]
 
     def _write_checkpoint(self):
         """Write information on the current state of AMS run to be able to restart"""
-        checkpoint_data = {"z_maxs": self.z_maxs, "iteration_number": self.ams_it, "initialized": self.initialized, "finished": self.finished, "success": self.success, "rep_weights": self.rep_weights, "z_kill": self.z_kill, "killed": self.killed, "current_p": self.current_p}
+        checkpoint_data = {"z_maxs": self.z_maxs,
+                           "rep_weights": self.rep_weights,
+                           "killed": self.killed,
+                           "alive": self.alive,
+                           "z_kill": self.z_kill,
+                           "remaining_killed": self.remaining_killed,
+                           "iteration_number": self.ams_it,
+                           "initialized": self.initialized,
+                           "finished": self.finished,
+                           "success": self.success,
+                           "current_step": self.dyn.nsteps,
+                           "current_rep": self.current_rep,
+                           "current_p": self.current_p}
         json_file = paropen(self.ams_dir + "/ams_checkpoint.txt", "w")
         json.dump(checkpoint_data, json_file, indent=4, cls=NumpyEncoder)
         json_file.close()
+
+    def _write_current_atoms(self):
+        write("current_atoms.xyz", self.dyn.atoms, format="extxyz")
+        write("POSCAR", self.dyn.atoms, format="vasp")
 
     def run(self, max_iter=-1):
         """Run AMS, should handle the restarts correctly"""
@@ -343,3 +378,79 @@ class AMS:
                     self.success = False
                     self._write_checkpoint()
                     continue_running = False
+
+    def run_step_by_step(self, forces, energy, stress):
+        """Run AMS by calling this function steps by steps"""
+        if os.path.exists(self.ams_dir + "/ams_checkpoint.txt"):
+            self._read_checkpoint()
+        barrier()  # Wait for all threads to read checkpoint
+        if not self.initialized:
+            if self.current_rep is None:
+                self.z_maxs = (np.ones(self.n_rep) * (-np.infty)).tolist()
+                self.current_rep = 0
+                self.dyn.nsteps = 0
+        if not self.finished:
+            traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(self.current_rep) + ".traj", mode="a", atoms=self.dyn.atoms))
+            self.dyn.attach(traj.write, interval=self.cv_interval)
+            z = self._rc()
+            if z >= self.z_maxs[self.current_rep]:
+                self.z_maxs[self.current_rep] = z
+            f = paropen(self.ams_dir + "/rc_rep_" + str(self.current_rep) + ".txt", "a")
+            f.write(str(z) + "\n")
+            f.close()
+            if self.dyn.nsteps > 0:
+                self.dyn.atoms.calc.results['forces'] = forces
+                self.dyn.atoms.calc.results['stress'] = stress
+                self.dyn.atoms.calc.results['energy'] = energy
+                self.dyn.atoms.calc.results['free_energy'] = energy
+                self.dyn._2nd_half_step(forces)
+            else:
+                self.dyn.call_observers()
+            if z > -np.infty and z < np.infty and self.dyn.nsteps <= self.max_length_iter:
+                self.dyn._1st_half_step(forces)
+                self.dyn.nsteps += 1
+                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results['free_energy'] = np.zeros_like(energy)
+                self._write_current_atoms()
+                self._write_checkpoint()
+                return False, False
+            else:
+                if not self.initialized:
+                    if self.current_rep + 1 == self.n_rep:
+                        self.initialized = True
+                    else:
+                        self.current_rep += 1
+                        self.dyn.nsteps = 0
+                        self._pick_ini_cond(rep_index=self.current_rep)
+                if self.initialized: ## not an else here, IMPORTANT
+                    if len(self.remaining_killed) == 0:
+                        if np.min(self.z_maxs) >= np.infty:
+                            self.finished = True
+                            self.success = True
+                            self._write_checkpoint()
+                            return True, False
+                        self.ams_it += 1
+                        killed, self.alive = self._kill_reps()
+                        if self.ams_it > 0:
+                            for i in range(self.n_rep):
+                                self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+                            self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
+                        if len(killed) == self.n_rep:
+                            self.finished = True
+                            self.success = False
+                            self._write_checkpoint()
+                            return True, False
+                        self.current_rep = killed.pop()
+                        self.remaining_killed = killed
+                    else:
+                        self.current_rep = self.remaining_killed.pop()
+                    j = np.random.choice(self.alive)
+                    _ = self._branch_replica(self.current_rep, j, self.z_kill[-1])
+                    self.dyn.nsteps = 0
+                self._write_current_atoms()
+                self._write_checkpoint()
+                return False, True
+        else:
+            return True, False
