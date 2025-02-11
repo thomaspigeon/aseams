@@ -23,7 +23,7 @@ class NumpyEncoder(json.JSONEncoder):
 class AMS:
     """Running AMS"""
 
-    def __init__(self, n_rep, k_min, dyn, xi, cv_interval=1, rc_threshold=0.0, save_all=False, max_length_iter=np.infty, verbose=False):
+    def __init__(self, n_rep, k_min, dyn, xi, cv_interval=1, rc_threshold=0.0, save_all=False, max_length_iter=np.inf, verbose=False):
         """
         Parameters:
 
@@ -133,9 +133,9 @@ class AMS:
     def _rc(self):
         z = self.xi.rc(self.dyn.atoms)
         if self.xi.in_r(self.dyn.atoms):
-            z = -np.infty
+            z = -np.inf
         elif self.xi.in_p(self.dyn.atoms):
-            z = np.infty
+            z = np.inf
         return z
 
     def _set_initialcond_dyn(self, atoms):
@@ -153,7 +153,7 @@ class AMS:
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
         if existing_steps == 0:
             f.write(str(z) + "\n")
-        while (z > -np.infty and z < np.infty) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
+        while (z > -np.inf and z < np.inf) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
             self.dyn.run(self.cv_interval)
             z = self._rc()
             f.write(str(z) + "\n")
@@ -169,7 +169,7 @@ class AMS:
             raise ValueError("""The directory of initial conditions is not defined ! Call ams.set_ini_cond_dir""")
         if self.ams_dir is None:
             raise ValueError("""The directory of alive trajectories is not defined ! Call ams.set_ams_dir""")
-        self.z_maxs = (np.ones(self.n_rep) * (-np.infty)).tolist()
+        self.z_maxs = (np.ones(self.n_rep) * (-np.inf)).tolist()
 
         existing_reps = [int(fi.split(".")[0].split("_")[-1]) for fi in os.listdir(self.ams_dir) if fi.startswith("rep_") and fi.endswith(".traj")]
         for i in existing_reps.copy():
@@ -245,13 +245,13 @@ class AMS:
 
     def _iteration(self):
         """Perform one iteration of the AMS algorithm"""
-        if np.min(self.z_maxs) >= np.infty:
+        if np.min(self.z_maxs) >= np.inf:
             self.finished = True
             self.success = True
             self._write_checkpoint()
             return False
         z_maxs_np = np.asarray(self.z_maxs)
-        z_kill = np.sort(z_maxs_np[z_maxs_np > -np.infty])[self.k_min - 1]  # Ensure to take z_kill above infinity
+        z_kill = np.sort(z_maxs_np[z_maxs_np > -np.inf])[self.k_min - 1]  # Ensure to take z_kill above infinity
         self.z_kill.append(z_kill)
         killed = np.flatnonzero(z_maxs_np - z_kill <= self.rc_threshold)
         self.killed.append(killed.tolist())
@@ -283,14 +283,14 @@ class AMS:
             rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
             if len(rc_traj.shape) == 0:
                 rc_traj = rc_traj.reshape([1])
-            if np.max(rc_traj) <= z_kill and (rc_traj[-1] <= -np.infty or rc_traj[-1] >= np.infty):
+            if np.max(rc_traj) <= z_kill and (rc_traj[-1] <= -np.inf or rc_traj[-1] >= np.inf):
                 if world.rank == 0:
                     j = np.random.choice(alive)
                 else:
                     j = None
                 j = broadcast(j)
                 lentraj = self._branch_replica(i, j, z_kill)
-            elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -np.infty or rc_traj[-1] >= np.infty):
+            elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -np.inf or rc_traj[-1] >= np.inf):
                 read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
                 lentraj = len(read_traj)
                 self._set_initialcond_dyn(read_traj[-1])
@@ -306,7 +306,7 @@ class AMS:
             print("AMS not run")
             return 0.0
         for i in range(self.n_rep):
-            if self.z_maxs[i] >= np.infty:  # If in B
+            if self.z_maxs[i] >= np.inf:  # If in B
                 p += self.rep_weights[i][-1]
 
         return p

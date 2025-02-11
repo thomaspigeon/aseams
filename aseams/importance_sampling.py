@@ -189,7 +189,7 @@ def committor_estimation(ams_runs_paths, rc_grad):
             vel = rc_vel(read(data_ams + f"rep_{n}.traj", index="0"), rc_grad)
             vels.append(vel)
             weights.append(w_r[n])
-            if z_maxs[n] >= np.infty:
+            if z_maxs[n] >= np.inf:
                 is_reactive.append(1)
             else:
                 is_reactive.append(0)
