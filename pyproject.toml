@@ -1,0 +1,24 @@
+[project]
+name = "better-kan"
+version = "0.1.0"
+description = "An efficient pure-PyTorch implementation of Kolmogorov-Arnold Network (KAN) including plotting and pruning."
+authors = [
+    {name = "Hadrien Vroylandt", email = "hadrien.vroylandt@enpc.fr"},
+]
+dependencies = [
+    "ase",
+    "numpy",
+    "statsmodels",
+    "scipy"
+]
+requires-python = ">=3.8"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true

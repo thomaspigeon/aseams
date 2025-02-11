@@ -7,18 +7,15 @@ from ase.md import Langevin
 import ase.units as units
 import ase.geometry
 import sys
-import scipy.integrate
 
-sys.path.insert(0, "../")
-
-from ams import AMS
-from cvs import CollectiveVariables
-from inicondsamplers import InitialConditionsSampler
+from aseams.ams import AMS
+from aseams.cvs import CollectiveVariables
+from aseams.inicondsamplers import InitialConditionsSampler
 from ase.parallel import parprint
 from ase.io import read
 import matplotlib.pyplot as plt
 
-from importance_sampling import committor_estimation, rayleigh, build_commitor_bias, committor_bias
+from aseams.importance_sampling import committor_estimation, rayleigh, build_commitor_bias, committor_bias
 
 
 def distance(atoms):

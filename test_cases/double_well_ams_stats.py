@@ -5,13 +5,10 @@ from ase.constraints import FixCom
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.md import Langevin
 import ase.units as units
-import sys
 
-sys.path.insert(0, "../")
-
-from ams import AMS
-from cvs import CollectiveVariables
-from inicondsamplers import InitialConditionsSampler
+from aseams.ams import AMS
+from aseams.cvs import CollectiveVariables
+from aseams.inicondsamplers import InitialConditionsSampler
 from ase.parallel import parprint
 from ase.io import read
 import matplotlib.pyplot as plt
