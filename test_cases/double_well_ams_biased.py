@@ -57,11 +57,11 @@ cv.set_p_crit("above")
 cv.set_in_p_boundary(1.95)
 
 
-# inicondsampler = InitialConditionsSampler(dyn, cv)
-# #
-# inicondsampler.set_run_dir("ini_conds/")
-# inicondsampler.set_ini_cond_dir("ini_conds/")
-# inicondsampler.sample(25)
+inicondsampler = InitialConditionsSampler(dyn, cv)
+#
+inicondsampler.set_run_dir("ini_conds/")
+inicondsampler.set_ini_cond_dir("ini_conds/")
+inicondsampler.sample(25)
 
 
 # Bias initial conditions
@@ -72,7 +72,7 @@ for m, temp_bias in enumerate(bias_temps):
     res_ams = np.zeros(25)
     for n in range(len(res_ams)):
         parprint(f"AMS {n}")
-        bias_init_cond_velocity(grad_distance, "ini_conds_for_bias/", "ini_conds_biased/", temperature_K, {"type": "rayleigh", "bias_temp": temp_bias}, constraints=[FixCom()])
+        bias_init_cond_velocity(grad_distance, "ini_conds/", "ini_conds_biased/", temperature_K, {"type": "rayleigh", "bias_temp": temp_bias}, constraints=[FixCom()])
         ams = AMS(n_rep=25, k_min=1, dyn=dyn, xi=cv, save_all=True, rc_threshold=1e-6, verbose=False)
         ams.set_ini_cond_dir("ini_conds_biased/")
         ams.set_ams_dir(f"AMS_bias_{n}/", clean=True)
