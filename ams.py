@@ -5,7 +5,7 @@ import json
 from ase.io import Trajectory, read, write
 from ase.io.formats import UnknownFileTypeError
 from ase.parallel import parprint, paropen, world, barrier, broadcast
-
+from ase.constraints import FixCom
 
 class NumpyEncoder(json.JSONEncoder):
     """Special json encoder for numpy types"""
@@ -23,7 +23,18 @@ class NumpyEncoder(json.JSONEncoder):
 class AMS:
     """Running AMS"""
 
-    def __init__(self, n_rep, k_min, dyn, xi, cv_interval=1, rc_threshold=0.0, save_all=False, max_length_iter=np.infty, verbose=False):
+    def __init__(self, 
+                 n_rep, 
+                 k_min, 
+                 dyn, 
+                 xi,
+                 fixcm=True,
+                 cv_interval=1, 
+                 rc_threshold=0.0, 
+                 save_all=False, 
+                 max_length_iter=np.inf,
+                 verbose=False, 
+                 rng=None):
         """
         Parameters:
 
@@ -69,6 +80,10 @@ class AMS:
         # TODO Change the check here to make it consistent with otf objects.
         # if type(dyn).__name__ != "Langevin":
         #    raise ValueError("""dyn must be a Langevin object""")
+        if rng is None:
+            self.rng = np.random
+        else:
+            self.rng = rng
         if isinstance(cv_interval, int) and cv_interval >= 1:
             self.cv_interval = cv_interval
         else:
@@ -83,7 +98,7 @@ class AMS:
         self.finished = False
         self.xi = xi
         self.dyn = dyn
-        self.dyn.nsteps = 1
+        self.fixcm = fixcm
         self.ini_cond_dir = None
         self.ams_dir = None
         self.z_maxs = None
@@ -121,9 +136,9 @@ class AMS:
     def _rc(self):
         z = self.xi.rc(self.dyn.atoms)
         if self.xi.in_r(self.dyn.atoms):
-            z = -np.infty
+            z = -np.inf
         elif self.xi.in_p(self.dyn.atoms):
-            z = np.infty
+            z = np.inf
         return z
 
     def _set_initialcond_dyn(self, atoms):
@@ -132,20 +147,24 @@ class AMS:
         """
         self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
         self.dyn.atoms.set_momenta(atoms.get_momenta())
-        self.dyn.atoms.calc.results['forces'] = atoms.get_forces()
-        self.dyn.atoms.calc.results['stress'] = atoms.get_stress()
+        self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
+        self.dyn.atoms.calc.results['stress'] = atoms.get_stress(apply_constraint=False)
         self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()
-        self.dyn.atoms.calc.results['free_energy'] = atoms.get_potential_energy()
 
     def _until_r_or_p(self, i, existing_steps=0):
-        traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms))
+        traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj",
+                                              mode="a",
+                                              atoms=self.dyn.atoms,
+                                              properties=['energy', 'stress', 'forces']))
         self.dyn.attach(traj.write, interval=self.cv_interval)
         self.dyn.nsteps = existing_steps  # Force writing the first step if start of the trajectory
         z = self._rc()
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
         if existing_steps == 0:
             f.write(str(z) + "\n")
-        while (z > -np.infty and z < np.infty) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
+        if self.fixcm:
+            self.dyn.atoms.set_constraint(FixCom())
+        while (z > -np.inf and z < np.inf) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
             self.dyn.run(self.cv_interval)
             z = self._rc()
             f.write(str(z) + "\n")
@@ -157,8 +176,7 @@ class AMS:
 
     def _pick_ini_cond(self, rep_index):
         if world.rank == 0:
-            ini_cond = np.random.choice(
-                [ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini and ini.endswith(".extxyz")])
+            ini_cond = self.rng.choice(np.sort([ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini and ini.endswith("z")]))
         else:
             ini_cond = None
         ini_cond = broadcast(ini_cond)
@@ -178,7 +196,7 @@ class AMS:
             raise ValueError("""The directory of initial conditions is not defined ! Call ams.set_ini_cond_dir""")
         if self.ams_dir is None:
             raise ValueError("""The directory of alive trajectories is not defined ! Call ams.set_ams_dir""")
-        self.z_maxs = (np.ones(self.n_rep) * (-np.infty)).tolist()
+        self.z_maxs = (np.ones(self.n_rep) * (-np.inf)).tolist()
 
         existing_reps = [int(fi.split(".")[0].split("_")[-1]) for fi in os.listdir(self.ams_dir) if fi.startswith("rep_") and fi.endswith(".traj")]
         for i in existing_reps.copy():
@@ -227,14 +245,14 @@ class AMS:
         f.close()
 
         read_traj = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
-        write(self.ams_dir + "/rep_" + str(i) + ".traj", read_traj[: branch_level])
+        write(self.ams_dir + "/rep_" + str(i) + ".traj", read_traj[: branch_level], format='traj')
 
         self._set_initialcond_dyn(read_traj[branch_level])
         return branch_level + 1
 
     def _kill_reps(self):
         z_maxs_np = np.asarray(self.z_maxs)
-        self.z_kill.append(np.sort(z_maxs_np[z_maxs_np > -np.infty])[self.k_min - 1]) # Ensure to take z_kill above infinity
+        self.z_kill.append(np.sort(z_maxs_np[z_maxs_np > -np.inf])[self.k_min - 1]) # Ensure to take z_kill above infinity
         killed = np.flatnonzero(z_maxs_np - self.z_kill[-1] <= self.rc_threshold)
         self.killed.append(killed.tolist())
         alive = np.setdiff1d(np.arange(self.n_rep), killed)
@@ -243,7 +261,7 @@ class AMS:
 
     def _iteration(self):
         """Perform one iteration of the AMS algorithm"""
-        if np.min(self.z_maxs) >= np.infty:
+        if np.min(self.z_maxs) >= np.inf:
             self.finished = True
             self.success = True
             self._write_checkpoint()
@@ -256,7 +274,7 @@ class AMS:
             return False
         for i in killed:
             if world.rank == 0:
-                j = np.random.choice(alive)
+                j = self.rng.choice(alive)
             else:
                 j = None
             j = broadcast(j)
@@ -277,14 +295,14 @@ class AMS:
             rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
             if len(rc_traj.shape) == 0:
                 rc_traj = rc_traj.reshape([1])
-            if np.max(rc_traj) <= z_kill and (rc_traj[-1] <= -np.infty or rc_traj[-1] >= np.infty):
+            if np.max(rc_traj) <= z_kill and (rc_traj[-1] <= -np.inf or rc_traj[-1] >= np.inf):
                 if world.rank == 0:
-                    j = np.random.choice(alive)
+                    j = self.rng.choice(alive)
                 else:
                     j = None
                 j = broadcast(j)
                 lentraj = self._branch_replica(i, j, z_kill)
-            elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -np.infty or rc_traj[-1] >= np.infty):
+            elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -np.inf or rc_traj[-1] >= np.inf):
                 read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
                 lentraj = len(read_traj)
                 self._set_initialcond_dyn(read_traj[-1])
@@ -301,7 +319,7 @@ class AMS:
             print("AMS not run")
             return 0.0
         for i in range(self.n_rep):
-            if self.z_maxs[i] >= np.infty:  # If in B
+            if self.z_maxs[i] >= np.inf:  # If in B
                 p += self.rep_weights[i][-1]
         return p
 
@@ -311,6 +329,7 @@ class AMS:
         checkpoint_data = json.load(json_file)
         json_file.close()
         self.z_maxs = checkpoint_data["z_maxs"]
+        self.dyn.nsteps = checkpoint_data["nsteps"]
         self.ams_it = checkpoint_data["iteration_number"]
         self.initialized = checkpoint_data["initialized"]
         self.finished = checkpoint_data["finished"]
@@ -320,7 +339,6 @@ class AMS:
         self.killed = checkpoint_data["killed"]
         self.current_p = checkpoint_data["current_p"]
         self.current_rep = checkpoint_data["current_rep"]
-        self.dyn.nsteps = checkpoint_data["current_step"]
         self.remaining_killed = checkpoint_data["remaining_killed"]
         self.alive = checkpoint_data["alive"]
 
@@ -328,6 +346,7 @@ class AMS:
         """Write information on the current state of AMS run to be able to restart"""
         checkpoint_data = {"z_maxs": self.z_maxs,
                            "rep_weights": self.rep_weights,
+                           "nsteps": self.dyn.nsteps,
                            "killed": self.killed,
                            "alive": self.alive,
                            "z_kill": self.z_kill,
@@ -336,7 +355,6 @@ class AMS:
                            "initialized": self.initialized,
                            "finished": self.finished,
                            "success": self.success,
-                           "current_step": self.dyn.nsteps,
                            "current_rep": self.current_rep,
                            "current_p": self.current_p}
         json_file = paropen(self.ams_dir + "/ams_checkpoint.txt", "w")
@@ -345,7 +363,6 @@ class AMS:
 
     def _write_current_atoms(self):
         write("current_atoms.xyz", self.dyn.atoms, format="extxyz")
-        write("POSCAR", self.dyn.atoms, format="vasp")
 
     def run(self, max_iter=-1):
         """Run AMS, should handle the restarts correctly"""
@@ -368,10 +385,10 @@ class AMS:
             while continue_running:
                 if self.verbose:
                     parprint("AMS iteration:", self.ams_it)
-                # self.dyn.observers = []
+
                 continue_running = self._iteration()
-                self.ams_it += 1
                 if continue_running:
+                    self.ams_it += 1
                     np.savetxt(progress_file, np.hstack(([self.ams_it, self.current_p, np.min(self.z_maxs), np.max(self.z_maxs)], self.z_maxs))[None, :])
                 if max_iter > 0 and self.ams_it >= max_iter:
                     self.finished = True
@@ -384,13 +401,20 @@ class AMS:
         if os.path.exists(self.ams_dir + "/ams_checkpoint.txt"):
             self._read_checkpoint()
         barrier()  # Wait for all threads to read checkpoint
+        if self.fixcm:
+            self.dyn.atoms.set_constraint(FixCom())
         if not self.initialized:
             if self.current_rep is None:
-                self.z_maxs = (np.ones(self.n_rep) * (-np.infty)).tolist()
+                self.z_maxs = (np.ones(self.n_rep) * (-np.inf)).tolist()
                 self.current_rep = 0
                 self.dyn.nsteps = 0
+                self._pick_ini_cond(rep_index=0)
+        self.dyn.atoms.calc.ignored_changes = set(['positions'])
         if not self.finished:
-            traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(self.current_rep) + ".traj", mode="a", atoms=self.dyn.atoms))
+            traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(self.current_rep) + ".traj",
+                                                  mode="a",
+                                                  atoms=self.dyn.atoms,
+                                                  properties=['energy', 'stress', 'forces']))
             self.dyn.attach(traj.write, interval=self.cv_interval)
             z = self._rc()
             if z >= self.z_maxs[self.current_rep]:
@@ -402,55 +426,58 @@ class AMS:
                 self.dyn.atoms.calc.results['forces'] = forces
                 self.dyn.atoms.calc.results['stress'] = stress
                 self.dyn.atoms.calc.results['energy'] = energy
-                self.dyn.atoms.calc.results['free_energy'] = energy
                 self.dyn._2nd_half_step(forces)
             else:
                 self.dyn.call_observers()
-            if z > -np.infty and z < np.infty and self.dyn.nsteps <= self.max_length_iter:
+                forces = self.dyn.atoms.calc.results["forces"]
+            self.dyn.observers.pop(-1)
+            if z > -np.inf and z < np.inf and self.dyn.nsteps <= self.max_length_iter:
                 self.dyn._1st_half_step(forces)
                 self.dyn.nsteps += 1
                 self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
                 self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
                 self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
-                self.dyn.atoms.calc.results['free_energy'] = np.zeros_like(energy)
                 self._write_current_atoms()
                 self._write_checkpoint()
-                return False, False
+                return False
             else:
                 if not self.initialized:
                     if self.current_rep + 1 == self.n_rep:
                         self.initialized = True
+                        self.current_p = 0
+                        for i in range(self.n_rep):
+                            self.current_p += self.rep_weights[i][-1]
                     else:
                         self.current_rep += 1
                         self.dyn.nsteps = 0
                         self._pick_ini_cond(rep_index=self.current_rep)
                 if self.initialized: ## not an else here, IMPORTANT
                     if len(self.remaining_killed) == 0:
-                        if np.min(self.z_maxs) >= np.infty:
+                        if np.min(self.z_maxs) >= np.inf:
                             self.finished = True
                             self.success = True
                             self._write_checkpoint()
-                            return True, False
-                        self.ams_it += 1
+                            return True
                         killed, self.alive = self._kill_reps()
-                        if self.ams_it > 0:
-                            for i in range(self.n_rep):
-                                self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-                            self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
                         if len(killed) == self.n_rep:
                             self.finished = True
                             self.success = False
                             self._write_checkpoint()
-                            return True, False
-                        self.current_rep = killed.pop()
-                        self.remaining_killed = killed
-                    else:
-                        self.current_rep = self.remaining_killed.pop()
-                    j = np.random.choice(self.alive)
+                            return True
+                        self.remaining_killed = killed.tolist().copy()
+                    self.current_rep = self.remaining_killed.pop()
+                    j = self.rng.choice(self.alive)
                     _ = self._branch_replica(self.current_rep, j, self.z_kill[-1])
+                    if len(self.remaining_killed) == 0:
+                        self.ams_it += 1
+                        for i in range(self.n_rep):
+                            self.rep_weights[i].append(
+                                self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+                        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
                     self.dyn.nsteps = 0
+
                 self._write_current_atoms()
                 self._write_checkpoint()
-                return False, True
+                return False
         else:
-            return True, False
+            return True

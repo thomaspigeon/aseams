@@ -1,6 +1,7 @@
 from typing import IO, Optional, Union
 
 import numpy as np
+import os
 
 from ase import Atoms, units
 from ase.parallel import DummyMPI, world
@@ -98,10 +99,13 @@ class LangevinHalfSteps(Langevin):
                          append_trajectory=append_trajectory)
 
     def _1st_half_step(self, forces):
-        atoms = self.atoms
-        natoms = len(self.atoms)
-        self.v = self.atoms.get_velocities()
 
+        natoms = len(self.atoms)
+
+        # This velocity as well as xi, eta and a few other variables are stored
+        # as attributes, so Asap can do its magic when atoms migrate between
+        # processors.
+        self.v = self.atoms.get_velocities()
         xi = self.rng.standard_normal(size=(natoms, 3))
         eta = self.rng.standard_normal(size=(natoms, 3))
 
@@ -111,35 +115,46 @@ class LangevinHalfSteps(Langevin):
         # correct target temperature.
         for constraint in self.atoms.constraints:
             if hasattr(constraint, 'redistribute_forces_md'):
-                constraint.redistribute_forces_md(atoms, xi, rand=True)
-                constraint.redistribute_forces_md(atoms, eta, rand=True)
+                constraint.redistribute_forces_md(self.atoms, xi, rand=True)
+                constraint.redistribute_forces_md(self.atoms, eta, rand=True)
+                constraint.redistribute_forces_md(self.atoms, forces)
 
         self.communicator.broadcast(xi, 0)
         self.communicator.broadcast(eta, 0)
 
         # To keep the center of mass stationary, we have to calculate
         # the random perturbations to the positions and the momenta,
-        # and make sure that they sum to zero.
+        # and make sure that they sum to zero.  This perturbs the
+        # temperature slightly, and we have to correct.
         self.rnd_pos = self.c5 * eta
         self.rnd_vel = self.c3 * xi - self.c4 * eta
         if self.fix_com:
+            factor = np.sqrt(natoms / (natoms - 1.0))
             self.rnd_pos -= self.rnd_pos.sum(axis=0) / natoms
-            self.rnd_vel -= (self.rnd_vel * self.masses).sum(axis=0) / (self.masses * natoms)
+            self.rnd_vel -= (self.rnd_vel *
+                             self.masses).sum(axis=0) / (self.masses * natoms)
+            self.rnd_pos *= factor
+            self.rnd_vel *= factor
 
         # First halfstep in the velocity.
-        self.v += (self.c1 * forces / self.masses - self.c2 * self.v + self.rnd_vel)
+        self.v += (self.c1 * forces / self.masses - self.c2 * self.v +
+                   self.rnd_vel)
 
         # Full step in positions
-        x = atoms.get_positions()
-
+        x = self.atoms.get_positions()
         # Step: x^n -> x^(n+1) - this applies constraints if any.
-        atoms.set_positions(x + self.dt * self.v + self.rnd_pos)
-        atoms.calc.results['forces'] = np.zeros_like(forces)
+        self.atoms.set_positions(x + self.dt * self.v + self.rnd_pos)
+        np.savetxt('rnd_vel.txt', self.rnd_vel)
+
+        self.v = (self.atoms.get_positions() - x - self.rnd_pos) / self.dt
+        self.atoms.calc.results['forces'] = np.zeros_like(forces)
         # recalc velocities after RATTLE constraints are applied
-        atoms.set_momenta((self.atoms.get_positions() - x - self.rnd_pos) / (self.dt * self.masses))
+        self.atoms.set_velocities(self.v)
 
     def _2nd_half_step(self, forces):
+        self.rnd_vel = np.loadtxt('rnd_vel.txt')
         self.v = self.atoms.get_velocities()
-        self.v += (self.c1 * forces / self.masses - self.c2 * self.v + self.rnd_vel)
+        self.v += (self.c1 * forces / self.masses - self.c2 * self.v +
+                   self.rnd_vel)
         self.atoms.set_momenta(self.v * self.masses)
         self.call_observers()
