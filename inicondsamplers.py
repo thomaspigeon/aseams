@@ -682,12 +682,12 @@ class FlemmingViotInitialConditionsSampler:
                     self.t_sigma_r[self.last_r_visited][-1] += self.cv_interval
                 if self.xi.is_out_of_r_zone(self.dyn.atoms):
                     _ = self._branch_fv_particle()
-                    self.first_in_r = False
                     if self.first_in_r:
                         t_sigma_out = self.t_sigma_r[self.last_r_visited].pop(-1)
                         t_r_sigma_out = self.t_r_sigma[self.last_r_visited].pop(-1)
                         self.t_sigma_out[self.last_r_visited].append(t_sigma_out)
                         self.t_r_sigma_out[self.last_r_visited].append(t_r_sigma_out)
+                    self.first_in_r = False
                 if self.xi.in_r(self.dyn.atoms):
                     self.first_in_r = True
             n_cdt += 1
