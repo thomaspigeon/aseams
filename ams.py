@@ -194,7 +194,7 @@ class AMS:
         """function to chekc if the ini conds have a calculaor"""
         fnames = [ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith("z")]
         for name in fnames:
-            atoms = read(name, format='extxyz', index=0)
+            atoms = read(self.ini_cond_dir + "/" + name, format='extxyz', index=0)
             if atoms.calc is None:
                 #parprint(name)
                 os.system("rm " + self.ini_cond_dir + "/" + name)
