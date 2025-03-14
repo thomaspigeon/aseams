@@ -398,6 +398,7 @@ class AMS:
             self._read_checkpoint()
         barrier()  # Wait for all threads to read checkpoint
         if not self.initialized:
+            self._check_the_conds()
             # self.dyn.observers = []
             self._initialize()
         else:
