@@ -190,6 +190,15 @@ class AMS:
         self._set_initialcond_dyn(atoms)
         self._write_checkpoint()  # Save weight into checkpoint
 
+    def _check_state_traj(self):
+        """function to check if the rep and rc_rep files are of same length"""
+        for i in range(self.n_rep):
+            traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
+            rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
+            if not len(traj) == len(rc_traj):
+                raise ValueError("Replica " + str(i) + " has a problem, rc_traj and traj are not the same length")
+
+
     def _initialize(self):
         """Run the N_rep replicas from the initial condition until it enters either R or P"""
         if self.ini_cond_dir is None:
@@ -374,6 +383,8 @@ class AMS:
         if not self.initialized:
             # self.dyn.observers = []
             self._initialize()
+        else:
+            self._check_state_traj()
         if self.verbose:
             parprint("Initialisation done")
         if os.path.exists(self.ams_dir + "/ams_checkpoint.txt") and self.initialized and not self.finished and self.dyn.nsteps == 1:
