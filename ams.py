@@ -190,6 +190,23 @@ class AMS:
         self._set_initialcond_dyn(atoms)
         self._write_checkpoint()  # Save weight into checkpoint
 
+    def _check_the_conds(self):
+        """function to chekc if the ini conds have a calculaor"""
+        fnames = [ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith("z")]
+        for name in fnames:
+            atoms = read(name, format='extxyz', index=0)
+            if atoms.calc is None:
+                #parprint(name)
+                os.system("rm " + self.ini_cond_dir + "/" + name)
+
+    def _reuse_ini_conds(self):
+        """function to rename used ini conds"""
+        fnames = [ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith("z")]
+        for name in fnames:
+            if "_used" in name:
+                new_name = name.split(".")[0][:-5] + '.' + name.split(".")[1]
+                os.rename(name, new_name)
+
     def _check_state_traj(self):
         """function to check if the rep and rc_rep files are of same length"""
         for i in range(self.n_rep):
@@ -310,7 +327,7 @@ class AMS:
                 else:
                     j = None
                 j = broadcast(j)
-                lentraj = self._branch_replica(i, j, z_kill)
+                _ = self._branch_replica(i, j, z_kill)
             elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -np.inf or rc_traj[-1] >= np.inf):
                 read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
                 lentraj = len(read_traj)
