@@ -403,13 +403,13 @@ class AMS:
             self._check_the_conds()
             # self.dyn.observers = []
             self._initialize()
-        else:
             self._check_state_traj()
         if self.verbose:
             parprint("Initialisation done")
         if os.path.exists(self.ams_dir + "/ams_checkpoint.txt") and self.initialized and not self.finished and self.dyn.nsteps == 1:
             # self.dyn.observers = []
             self._finish_iteration()
+            self._check_state_traj()
         continue_running = max_iter != 0
         with paropen(self.ams_dir + "/ams_progress.txt", "a") as progress_file:
             np.savetxt(progress_file, np.hstack(([self.ams_it, self.current_p, np.min(self.z_maxs), np.max(self.z_maxs)], self.z_maxs))[None, :])
