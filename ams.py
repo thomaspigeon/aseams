@@ -294,21 +294,23 @@ class AMS:
             self.success = True
             self._write_checkpoint()
             return False
-        killed, alive = self._kill_reps()
-        if len(killed) == self.n_rep:
+        self.remaining_killed, self.alive = self._kill_reps()
+        if len(self.remaining_killed) == self.n_rep:
             self.finished = True
             self.success = False
             self._write_checkpoint()
             return False
-        for i in killed:
+        while len(self.remaining_killed) > 0:
+            i = self.remaining_killed[-1]
             if world.rank == 0:
-                j = self.rng.choice(alive)
+                j = self.rng.choice(self.alive)
             else:
                 j = None
             j = broadcast(j)
             #len_branch = self._branch_replica(i, j, self.z_kill[-1])
             _ = self._branch_replica(i, j, self.z_kill[-1])
             self._until_r_or_p(i, 0) #always write the branching position via the first step of the dyn.run
+            i = self.remaining_killed.pop(-1)
             self._write_checkpoint()
         # update probability and weights
         for i in range(self.n_rep):
@@ -318,8 +320,9 @@ class AMS:
 
     def _finish_iteration(self):
         z_kill = self.z_kill[-1]
-        alive = np.setdiff1d(np.arange(self.n_rep), self.killed[-1])
-        for i in self.killed[-1]:
+        alive = self.alive
+        while len(self.remaining_killed) > 0:
+            i = self.remaining_killed[-1]
             rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
             if len(rc_traj.shape) == 0:
                 rc_traj = rc_traj.reshape([1])
@@ -336,6 +339,7 @@ class AMS:
                 self._set_initialcond_dyn(read_traj[-1])
             self._until_r_or_p(i, lentraj)
             self._write_checkpoint()
+            i = self.remaining_killed.pop(-1)
         # update probability and weights
         for i in range(self.n_rep):
             self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
