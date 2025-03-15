@@ -162,6 +162,8 @@ class AMS:
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
         if existing_steps == 0:
             f.write(str(z) + "\n")
+        if not (z > -np.inf and z < np.inf) and world.rank == 0:
+            self.dyn.call_observers()
         if self.fixcm:
             self.dyn.atoms.set_constraint(FixCom())
         while (z > -np.inf and z < np.inf) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
