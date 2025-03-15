@@ -601,7 +601,10 @@ class FlemmingViotInitialConditionsSampler:
                 time.sleep(60)
         trajfile = self.run_dir + str(branch_rep_number) + "/md_traj_{}.traj".format(traj_idx)
         list_atoms = read(trajfile, index=":", format='traj')
-        atoms = list_atoms[self.dyn.nsteps - t[traj_idx - 1]]
+        if traj_idx == 0:
+            atoms = list_atoms[self.dyn.nsteps]
+        else:
+            atoms = list_atoms[self.dyn.nsteps - t[traj_idx - 1]]
         self._set_initialcond_dyn(atoms)
         return atoms
 
