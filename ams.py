@@ -296,6 +296,7 @@ class AMS:
             return False
         self.remaining_killed, self.alive = self._kill_reps()
         self.remaining_killed = self.remaining_killed.tolist()
+        self._write_checkpoint()
         if len(self.remaining_killed) == self.n_rep:
             self.finished = True
             self.success = False
