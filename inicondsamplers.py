@@ -545,18 +545,18 @@ class FlemmingViotInitialConditionsSampler:
         if not os.path.exists(self.run_dir + str(self.w_i)) and world.rank == 0:
             os.mkdir(self.run_dir + str(self.w_i))
         n_traj_already = len([fi for fi in os.listdir(self.run_dir + str(self.w_i)) if fi.endswith(".traj")])
-        t = []
-        for i in range(n_traj_already):
-            trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(i)
-            list_atoms = read(trajfile, index=":", format='traj')
-            if i == 0:
-                t.append(len(list_atoms))
-            else:
-                t.append(len(list_atoms) + t[-1])
-        if len(t) == 0:
-            self.dyn.nsteps = 0
-        else:
-            self.dyn.nsteps = t[-1]
+        #t = []
+        #for i in range(n_traj_already):
+        #    trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(i)
+        #    list_atoms = read(trajfile, index=":", format='traj')
+        #    if i == 0:
+        #        t.append(len(list_atoms))
+        #    else:
+        #        t.append(len(list_atoms) + t[-1])
+        #if len(t) == 0:
+        #    self.dyn.nsteps = 0
+        #else:
+        #    self.dyn.nsteps = t[-1]
         if not append_traj:
             self.trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(n_traj_already)
             traj = self.dyn.closelater(Trajectory(filename=self.trajfile,
