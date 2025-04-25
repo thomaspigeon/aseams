@@ -9,6 +9,61 @@ import json
 from statsmodels.nonparametric.kernel_regression import KernelReg
 
 import scipy.integrate
+from scipy.special import roots_laguerre
+from scipy.integrate import quad
+
+# def gauss_laguerre_quad(f,sigma, n):
+#     """Quadrature de Gauss-Laguerre avec n points."""
+#     nodes, weights = roots_laguerre(n)
+#     return np.sum(weights *  f(np.sqrt(2*nodes)*sigma))
+
+
+def infinite_integrale(f,sig2):
+    """
+    Compute Integrale of a function against a Rayleigh of parameter sigma, with error estimation
+    """
+    return quad(lambda x : f(np.sqrt(2*x*sig2))*np.exp(-x), 0,np.infty)[0]
+    # I_n = np.zeros(100)
+    # for n in range(5,50): 
+    #     if n < 9 or n%2==0: # If we have already computed the integrale
+    #         I_n[n] = gauss_laguerre_quad(f, sigma, n)
+    #     I_n[2*n-1] = gauss_laguerre_quad(f, sigma, 2 * n - 1)
+    #     if abs(I_n[2*n-1] - I_n[n]) <= eps:
+    #         return I_n[2*n-1] ,abs(I_n[2*n-1] - I_n[n])
+    # warnings.warn("Maximum order reached for integration")
+    # return I_n[2*n-1],abs(I_n[2*n-1] - I_n[n])
+
+
+def find_x_newton(f, df, target, x0=1.0, tol=1e-8, max_iter=50):
+    """
+    Trouve x tel que f(x) ≈ target en utilisant la méthode de Newton-Raphson.
+
+    Paramètres :
+        f        : fonction croissante
+        df       : dérivée de f
+        target   : valeur cible f(x) = target
+        x0       : point de départ
+        tol      : tolérance sur |f(x) - target|
+        max_iter : nombre maximal d'itérations
+
+    Retour :
+        x tel que f(x) ≈ target
+    """
+    x = x0
+    for i in range(max_iter):
+        fx = f(x)
+        dfx = df(x)
+        if dfx == 0:
+            raise ValueError("Dérivée nulle — Newton échoue")
+        dx = (fx - target) / dfx
+        x -= dx
+        if abs((fx - target)) < tol:
+            return x
+    raise ValueError("Méthode de Newton n'a pas convergé")
+
+
+
+
 
 # -------------  Generating new velocities -------------
 
@@ -144,7 +199,7 @@ def rc_vel(atoms, rc_grad, normalize=True):
 
 
 
-def build_commitor_bias(ams_runs_paths, rc_grad, temp, committor_type="tanh", n_points_eval=750, bandwidth=25, ceilling=1e-4):
+def build_commitor_bias(ams_runs_paths, rc_grad, temp, committor_type="tanh", n_points_eval=1000, bandwidth=25, ceilling=1e-4):
     """
     Build estimation of the committor from previous AMS run for next iteration
 
@@ -184,49 +239,61 @@ def build_commitor_bias(ams_runs_paths, rc_grad, temp, committor_type="tanh", n_
         warnings.warn("This is no reactive trajectories in your dataset, results wil be unreliable")
 
     bias_param = {"type": committor_type}
-
+    # Committor value outside of the 0 and 1 values
+    comm_valid_inds = np.logical_and(comm>0,comm<1)
     if committor_type == "tanh":
-
-        poly = np.polynomial.Polynomial.fit(v[comm > 0], np.arctanh(2 * comm[comm > 0] - 1), 1)
+        
+        poly = np.polynomial.Polynomial.fit(v[comm_valid_inds], np.arctanh(2 * comm[comm_valid_inds] - 1), 1)
         bias_param["committor_approx"] = lambda v: (0.5 * (1 + np.tanh(poly(v))))
 
-        vmax = 2 * (-poly.coef[0]) / poly.coef[-1]
+        vmax = (-poly.coef[0]) / poly.coef[-1]
 
     elif committor_type == "log":
-        poly = np.polynomial.Polynomial.fit(v[comm > 0], np.log(comm[comm > 0]), 1)
+        poly = np.polynomial.Polynomial.fit(v[comm_valid_inds], np.log(comm[comm_valid_inds]), 1)
         bias_param["committor_approx"] = lambda v: np.minimum(np.exp(poly(v)), 1)
 
-        vmax = 2 * (-poly.coef[0]) / poly.coef[-1]
+        vmax = (-poly.coef[0]) / poly.coef[-1]
 
     elif committor_type == "kernel":
         bandwidth = (np.max(v) - np.min(v)) / bandwidth
         model = KernelReg(comm, v, "c", "lc", bw=[bandwidth])
         bias_param["committor_approx"] = lambda v: ceilling + (1.0 - ceilling) * model.fit([v])[0]
+        vmax = np.max(v)
 
-        vmax = np.max(v) + 5 * bandwidth
 
-    # The key parameter for discretizing the v range is the maximum values that have to be chosen such that biasing function is close to zero at max value
-    vmax = np.maximum(vmax, 4 * np.sqrt(units.kB * temp))
-    # Evaluate grossly where is the max
-    v_range = np.linspace(0.0, vmax, n_points_eval)
-    bias_vals = rayleigh(v_range, units.kB * temp) * bias_param["committor_approx"](v_range)
-    loc_max_bias = v_range[np.argmax(bias_vals)]
-    # we look for first value that is at 10 times lower than the max
-    ind = np.argmax(bias_vals[v_range > loc_max_bias] / np.max(bias_vals) < 0.01)
-    if ind == 0:  # In case no values are below the thresold
-        ind = -1
-    alternative_vmax = v_range[v_range > loc_max_bias][ind]
+    bias_param["norm"] =infinite_integrale(bias_param["committor_approx"], units.kB * temp)
 
-    vmax = np.minimum(vmax, alternative_vmax)  # Don't look to far
+    def cdf_val(vmax):
+        return quad(lambda v : rayleigh(v, units.kB * temp) * bias_param["committor_approx"](v)/bias_param["norm"], 0,vmax)[0]
+    
+    def pdf_val(v):
+        return rayleigh(v, units.kB * temp) * bias_param["committor_approx"](v)/bias_param["norm"]
+    
+    try:
+        vmax=find_x_newton(cdf_val, pdf_val, 1-0.1/n_points_eval, vmax)
+    except ValueError:
+        warnings.warn("Unable to find a good max range for the cdf. Use heuristic")
+        vmax=2*vmax
 
+
+    # # The key parameter for discretizing the v range is the maximum values that have to be chosen such that biasing function is close to zero at max value
+    # vmax = np.maximum(vmax, 4 * np.sqrt(units.kB * temp))
+    # # Evaluate grossly where is the max
+    # v_range = np.linspace(0.0, vmax, n_points_eval)
+    # bias_vals = rayleigh(v_range, units.kB * temp) * bias_param["committor_approx"](v_range)
+    # loc_max_bias = v_range[np.argmax(bias_vals)]
+    # # we look for first value that is at 10 times lower than the max
+    # ind = np.argmax(bias_vals[v_range > loc_max_bias] / np.max(bias_vals) < 0.01)
+    # if ind == 0:  # In case no values are below the thresold
+    #     ind = -1
+    # alternative_vmax = v_range[v_range > loc_max_bias][ind]
+
+    # vmax = np.minimum(vmax, alternative_vmax)  # Don't look to far
+
+    
     bias_param["cdf_vels"] = np.linspace(0.0, vmax, n_points_eval)
-
-    res_ivp = scipy.integrate.solve_ivp(lambda v, y: np.asarray([rayleigh(v, units.kB * temp) * bias_param["committor_approx"](v)]), [0, vmax], y0=[0.0], t_eval=bias_param["cdf_vels"])
-    cdf = res_ivp.y.squeeze()
-    # cdf = scipy.integrate.cumulative_trapezoid(lambda v: rayleigh(v, units.kB * temp) * bias_param["committor_approx"], bias_param["cdf_vels"], initial=0.0)
-
-    bias_param["norm"] = cdf[-1]
-    bias_param["cdf"] = cdf / cdf[-1]
+    res_ivp = scipy.integrate.solve_ivp(lambda v, y: np.asarray([rayleigh(v, units.kB * temp) * bias_param["committor_approx"](v)/bias_param["norm"]]), [0, vmax], y0=[0.0], t_eval=bias_param["cdf_vels"])
+    bias_param["cdf"] =res_ivp.y.squeeze()
 
     return bias_param
 
