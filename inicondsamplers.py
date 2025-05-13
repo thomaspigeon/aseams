@@ -168,6 +168,7 @@ class InitialConditionsSampler:
             self._write_checkpoint()
         self.n_ini_conds_already = self.n_ini_conds_already + n_cdt
         self._write_checkpoint()
+        self.dyn.observers.pop()
 
     def _write_checkpoint(self):
         """write checkpoint data for step by step run"""
@@ -695,6 +696,7 @@ class FlemmingViotInitialConditionsSampler:
                     self.first_in_r = True
             n_cdt += 1
             self._write_checkpoint()
+            self.dyn.observers.pop()
 
     def sample_step_by_step(self, forces, energy, stress):
         """Run sampling of ini-conds calling this function steps by steps"""
