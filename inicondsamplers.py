@@ -108,7 +108,7 @@ class InitialConditionsSampler:
         n_cdt, n_stp = 0, 0
         if self.fixcm:
             self.dyn.atoms.set_constraint(FixCom())
-        self.n_ini_conds_already = len([ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith(".extyxz")])
+        self.n_ini_conds_already = len([ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith(".extxyz")])
         if isinstance(self.xi.cv_r, list):
             self.t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
             self.t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
@@ -168,7 +168,6 @@ class InitialConditionsSampler:
             self._write_checkpoint()
         self.n_ini_conds_already = self.n_ini_conds_already + n_cdt
         self._write_checkpoint()
-        self.dyn.observers.pop()
 
     def _write_checkpoint(self):
         """write checkpoint data for step by step run"""
@@ -392,7 +391,7 @@ class InitialConditionsSamplerFromFile:
             t_sigma_r = [[]]
 
         n_cdt, n_stp = 0, 0
-        n_ini_conds_already = len([ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith(".extyxz")])
+        n_ini_conds_already = len([ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith(".extxyz")])
         traj = read(file, index=":")
         n_steps = len(traj)
         while not self.xi.in_r(traj[n_stp]):
@@ -696,7 +695,6 @@ class FlemmingViotInitialConditionsSampler:
                     self.first_in_r = True
             n_cdt += 1
             self._write_checkpoint()
-            self.dyn.observers.pop()
 
     def sample_step_by_step(self, forces, energy, stress):
         """Run sampling of ini-conds calling this function steps by steps"""
