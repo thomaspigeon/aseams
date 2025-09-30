@@ -104,7 +104,9 @@ def bias_init_cond_velocity(rc_grad, ini_conds, ini_conds_biased, temp, bias_par
         atoms = read(file)
         for cons in constraints:  # If there is constraints
             atoms.set_constraint(cons)
-        if bias_params["type"] == "rayleigh":
+        if bias_params["type"] == "flat":
+            new_velocity, weight, scale_normal_component = flat_bias(temp, rng)
+        elif bias_params["type"] == "rayleigh":
             new_velocity, weight, scale_normal_component = rayleigh_bias(temp, bias_params, rng)
         else:
             new_velocity, weight, scale_normal_component = committor_bias(temp, bias_params, rng)
@@ -140,6 +142,20 @@ def set_velocities(rc_grad, atoms, normal_component, temp_orthogonal, scale_norm
 
 
 #  -----------     Importance sampling of the normal components
+
+def flat_bias(temp, rng=np.random.default_rng()):
+    """
+    Get a new velocity and associated weight
+
+    Temp is initial temperature of the system
+
+    bias_param contain all biais information
+
+    rng is a random number generator
+    """
+    x = rng.rayleigh(scale=1.0)
+    return x * np.sqrt(units.kB * temp), 1.0, False
+
 
 def rayleigh_bias(temp, bias_param, rng=np.random.default_rng()):
     """
@@ -235,8 +251,10 @@ def build_commitor_bias(ams_runs_paths, rc_grad, temp, committor_type="tanh", n_
     """
     v, comm = committor_estimation(ams_runs_paths, rc_grad)
 
-    if np.max(comm) < 1e-12:
-        warnings.warn("This is no reactive trajectories in your dataset, results wil be unreliable")
+    if np.max(comm) == 0.0:
+        warnings.warn("This is no reactive trajectories in your dataset, no bias will be used")
+        # In which case, we return a flat bias
+        return {"type": "flat", "cdf_vels": v, "committor_approx": lambda v: np.zeros_like(v)}, v, comm
 
     bias_param = {"type": committor_type}
     # Committor value outside of the 0 and 1 values
@@ -270,7 +288,7 @@ def build_commitor_bias(ams_runs_paths, rc_grad, temp, committor_type="tanh", n_
         return rayleigh(v, units.kB * temp) * bias_param["committor_approx"](v)/bias_param["norm"]
     
     try:
-        vmax=find_x_newton(cdf_val, pdf_val, 1-0.1/n_points_eval, vmax)
+        vmax=find_x_newton(cdf_val, pdf_val, 1-0.1/n_points_eval, np.max(v)) # We start from the maximum observed velocity, that should not be too far from the maximum
     except ValueError:
         warnings.warn("Unable to find a good max range for the cdf. Use heuristic")
         vmax=2*vmax
@@ -295,7 +313,7 @@ def build_commitor_bias(ams_runs_paths, rc_grad, temp, committor_type="tanh", n_
     res_ivp = scipy.integrate.solve_ivp(lambda v, y: np.asarray([rayleigh(v, units.kB * temp) * bias_param["committor_approx"](v)/bias_param["norm"]]), [0, vmax], y0=[0.0], t_eval=bias_param["cdf_vels"])
     bias_param["cdf"] =res_ivp.y.squeeze()
 
-    return bias_param
+    return bias_param, v,comm
 
 
 def committor_estimation(ams_runs_paths, rc_grad):
@@ -312,15 +330,15 @@ def committor_estimation(ams_runs_paths, rc_grad):
     """
 
     # Load data
-
+    vels = []
+    weights = []
+    is_reactive = []
     for data_ams in ams_runs_paths:
         json_file = open(data_ams + "ams_checkpoint.txt", "r")
         checkpoint_data = json.load(json_file)
         json_file.close()
         z_maxs = checkpoint_data["z_maxs"]
-        vels = []
-        weights = []
-        is_reactive = []
+        
         w_r = [w[-1] for w in checkpoint_data["rep_weights"]]
         n_reactives_files = len(z_maxs)
         for n in range(n_reactives_files):
@@ -343,9 +361,9 @@ def committor_estimation(ams_runs_paths, rc_grad):
             weights.append(weights_data["weights"][-1])
             is_reactive.append(0)
 
-        vels = np.asarray(vels)
-        weights = np.asarray(weights)
-        is_reactive = np.asarray(is_reactive)
+    vels = np.asarray(vels)
+    weights = np.asarray(weights)
+    is_reactive = np.asarray(is_reactive)
 
     inds_for_sort = np.argsort(vels)
     uniques_vels, index_to_split = np.unique(vels[inds_for_sort], return_index=True)
