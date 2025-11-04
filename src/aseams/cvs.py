@@ -4,7 +4,7 @@ import numpy as np
 class CollectiveVariables:
     """Class to gather collective variables used to sample initial conditions and run AMS"""
 
-    def __init__(self, cv_r, cv_p, reaction_coordinate):
+    def __init__(self, cv_r, cv_p, reaction_coordinate, rc_grad=None):
         """
         Parameters:
 
@@ -13,6 +13,8 @@ class CollectiveVariables:
         cv_p: function taking as argument an atoms object and returning a float or a list of such functions
 
         reaction_coordinate: function taking as argument an atoms object and returning a float
+
+        rc_grad: function that return the gradient of the reaction coordinate with respect to the positions of atoms
         """
 
         if (isinstance(cv_r, list) and np.prod([inspect.isfunction(_) for _ in cv_r])) or inspect.isfunction(cv_r):
@@ -27,6 +29,13 @@ class CollectiveVariables:
             self.rc = reaction_coordinate
         else:
             raise ValueError("""reaction_coordinate must be a function""")
+        if rc_grad is not None:
+            if inspect.isfunction(rc_grad):
+                self.rc_grad = rc_grad
+            else:
+                raise ValueError("""reaction_coordinate gradient must be a function""")
+        else:
+            self.rc_grad = None
         self.r_crit = None
         self.p_crit = None
         self.in_r_boundary = None
@@ -484,7 +493,7 @@ class CollectiveVariables:
                     in_p.append(self.cv_p[i](atoms) >= self.in_p_boundary[i])
                 if self.p_crit[i] == "below":
                     in_p.append(self.cv_p[i](atoms) <= self.in_p_boundary[i])
-                if self.r_crit[i] == "between":
+                if self.p_crit[i] == "between":
                     in_p.append(self.in_p_boundary[i][0] <= self.cv_p[i](atoms) <= self.in_p_boundary[i][1])
             return in_p
         else:
@@ -549,15 +558,22 @@ class CollectiveVariables:
                         """The function cv_p["""
                         + str(i)
                         + """] does not returns a float, cannot run AMS or initial conditions
-                                        sampler with this type of structures. If the structure atoms is the one desired, the CollectiveVariables
+                                sampler with this type of structures. If the structure atoms is the one desired, the CollectiveVariables
                                         object is not properly set and you should modify cv_p"""
                     )
         if not isinstance(self.rc(atoms), float):
             raise ValueError(
                 """The function reaction_coordinate does not returns a float, cannot run AMS or initial conditions
-                            sampler with this type of structures. If the structure atoms is the one desired, the CollectiveVariables
-                            object is not properly set and you should modify reaction_coordinate"""
+                sampler with this type of structures. If the structure atoms is the one desired, the CollectiveVariables
+                object is not properly set and you should modify reaction_coordinate"""
             )
+        if self.rc_grad is not None:
+            if not self.rc_grad(atoms).shape == (len(atoms), 3):
+                raise ValueError(
+                """The function reaction_coordinate gradient does not returns a  tensor or a float of shape 
+                (len(atoms), 3)  cannot bias the initial conditions, the CollectiveVariables object is not properly set 
+                and you should modify rc_grad"""
+                )
 
     def evaluate_cv_r(self, atoms):
         """Evaluate all the functions cv_r

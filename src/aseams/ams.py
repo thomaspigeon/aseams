@@ -77,9 +77,6 @@ class AMS:
             raise ValueError("""k_min must be an int such that 1 =< k_min < n_rep""")
         if type(xi).__name__ != "CollectiveVariables":
             raise ValueError("""xi must be a CollectiveVariables object""")
-        # TODO Change the check here to make it consistent with otf objects.
-        # if type(dyn).__name__ != "Langevin":
-        #    raise ValueError("""dyn must be a Langevin object""")
         if rng is None:
             self.rng = np.random
         else:
@@ -162,10 +159,13 @@ class AMS:
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
         if existing_steps == 0:
             f.write(str(z) + "\n")
+            if z >= self.z_maxs[i]:
+                self.z_maxs[i] = z
             if not (z > -np.inf and z < np.inf) and world.rank == 0:
                 self.dyn.call_observers()
         if self.fixcm:
             self.dyn.atoms.set_constraint(FixCom())
+            self.dyn.fix_com = True
         while (z > -np.inf and z < np.inf) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
             self.dyn.run(self.cv_interval)
             z = self._rc()
@@ -173,12 +173,13 @@ class AMS:
             if z >= self.z_maxs[i]:
                 self.z_maxs[i] = z
         f.close()
-        self.dyn.close()
         self.dyn.observers.pop(-1)
+        self.dyn.close()
+        self.dyn.nsteps = 0
 
     def _pick_ini_cond(self, rep_index):
         if world.rank == 0:
-            ini_cond = self.rng.choice(np.sort([ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini and ini.endswith("z")]))
+            ini_cond = self.rng.choice(np.sort([ini for ini in os.listdir(self.ini_cond_dir) if "_used" not in ini and ini.endswith("extxyz")]))
         else:
             ini_cond = None
         ini_cond = broadcast(ini_cond)
@@ -198,7 +199,7 @@ class AMS:
         for name in fnames:
             atoms = read(self.ini_cond_dir + "/" + name, format='extxyz', index=0)
             if atoms.calc is None:
-                #parprint(name)
+                # parprint(name)
                 os.system("rm " + self.ini_cond_dir + "/" + name)
 
     def _reuse_ini_conds(self):
@@ -207,7 +208,7 @@ class AMS:
         for name in fnames:
             if "_used" in name:
                 new_name = name.split(".")[0][:-5] + '.' + name.split(".")[1]
-                os.rename(name, new_name)
+                os.rename(self.ini_cond_dir + "/" + name, self.ini_cond_dir + "/" + new_name)
 
     def _check_state_traj(self):
         """function to check if the rep and rc_rep files are of same length"""
@@ -216,7 +217,6 @@ class AMS:
             rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
             if not len(traj) == len(rc_traj):
                 raise ValueError("Replica " + str(i) + " has a problem, rc_traj and traj are not the same length")
-
 
     def _initialize(self):
         """Run the N_rep replicas from the initial condition until it enters either R or P"""
@@ -296,8 +296,13 @@ class AMS:
             return False
         self.remaining_killed, self.alive = self._kill_reps()
         self.remaining_killed = self.remaining_killed.tolist()
+        self.ams_it += 1
         self._write_checkpoint()
         if len(self.remaining_killed) == self.n_rep:
+            for i in range(self.n_rep):
+                self.rep_weights[i].append(
+                    self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+            self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
             self.finished = True
             self.success = False
             self._write_checkpoint()
@@ -406,7 +411,7 @@ class AMS:
             self._read_checkpoint()
         barrier()  # Wait for all threads to read checkpoint
         if not self.initialized:
-            self._check_the_conds()
+            # self._check_the_conds()
             # self.dyn.observers = []
             self._initialize()
             self._check_state_traj()
@@ -422,10 +427,8 @@ class AMS:
             while continue_running:
                 if self.verbose:
                     parprint("AMS iteration:", self.ams_it)
-
                 continue_running = self._iteration()
                 if continue_running:
-                    self.ams_it += 1
                     np.savetxt(progress_file, np.hstack(([self.ams_it, self.current_p, np.min(self.z_maxs), np.max(self.z_maxs)], self.z_maxs))[None, :])
                 if max_iter > 0 and self.ams_it >= max_iter:
                     self.finished = True
@@ -440,13 +443,13 @@ class AMS:
         barrier()  # Wait for all threads to read checkpoint
         if self.fixcm:
             self.dyn.atoms.set_constraint(FixCom())
+            self.dyn.fix_com = True
         if not self.initialized:
             if self.current_rep is None:
                 self.z_maxs = (np.ones(self.n_rep) * (-np.inf)).tolist()
                 self.current_rep = 0
                 self.dyn.nsteps = 0
                 self._pick_ini_cond(rep_index=0)
-        self.dyn.atoms.calc.ignored_changes = set(['positions'])
         if not self.finished:
             traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(self.current_rep) + ".traj",
                                                   mode="a",
@@ -486,8 +489,8 @@ class AMS:
                             self.current_p += self.rep_weights[i][-1]
                     else:
                         self.current_rep += 1
-                        self.dyn.nsteps = 0
                         self._pick_ini_cond(rep_index=self.current_rep)
+                    self.dyn.nsteps = 0
                 if self.initialized: ## not an else here, IMPORTANT
                     if len(self.remaining_killed) == 0:
                         if np.min(self.z_maxs) >= np.inf:
@@ -496,7 +499,16 @@ class AMS:
                             self._write_checkpoint()
                             return True
                         killed, self.alive = self._kill_reps()
+                        self.ams_it += 1
+                        for i in range(self.n_rep):
+                            self.rep_weights[i].append(
+                                self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+                        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
                         if len(killed) == self.n_rep:
+                            for i in range(self.n_rep):
+                                self.rep_weights[i].append(
+                                    self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+                            self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
                             self.finished = True
                             self.success = False
                             self._write_checkpoint()
@@ -505,14 +517,9 @@ class AMS:
                     self.current_rep = self.remaining_killed.pop()
                     j = self.rng.choice(self.alive)
                     _ = self._branch_replica(self.current_rep, j, self.z_kill[-1])
-                    if len(self.remaining_killed) == 0:
-                        self.ams_it += 1
-                        for i in range(self.n_rep):
-                            self.rep_weights[i].append(
-                                self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-                        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
                     self.dyn.nsteps = 0
 
+                self.dyn.nsteps = 0
                 self._write_current_atoms()
                 self._write_checkpoint()
                 return False

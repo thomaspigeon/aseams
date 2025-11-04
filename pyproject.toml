@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aseams"
+version = "0.1.0"
+description = "Adaptive Multilevel Splitting tools for molecular dynamics simulations."
+authors = [
+    {name = "Thomas Pigeon", email = "thomas.pigeon@ifpen.fr"},
+    {name = "Hadrien Vroylandt", email = "hadrien.vroylandt@unicaen.fr"},
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "ase>=3.22",
+]
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.9"
+readme = "README.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black",
+    "flake8",
+    "isort",
+    "build",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.isort]
+profile = "black"
+
+# Optional classifier section:
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
