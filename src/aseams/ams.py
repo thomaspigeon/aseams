@@ -156,9 +156,11 @@ class AMS:
         self.dyn.attach(traj.write, interval=self.cv_interval)
         self.dyn.nsteps = existing_steps  # Force writing the first step if start of the trajectory
         z = self._rc()
-        f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
+
         if existing_steps == 0:
+            f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
             f.write(str(z) + "\n")
+            f.close()
             if z >= self.z_maxs[i]:
                 self.z_maxs[i] = z
             if not (z > -np.inf and z < np.inf) and world.rank == 0:
@@ -169,10 +171,12 @@ class AMS:
         while (z > -np.inf and z < np.inf) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
             self.dyn.run(self.cv_interval)
             z = self._rc()
+            f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
             f.write(str(z) + "\n")
+            f.close()
             if z >= self.z_maxs[i]:
                 self.z_maxs[i] = z
-        f.close()
+
         self.dyn.observers.pop(-1)
         self.dyn.close()
         self.dyn.nsteps = 0
