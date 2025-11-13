@@ -536,7 +536,7 @@ class MultiWalkerSampler(MDDynamicSampler):
         self.n_walkers = n_walkers
         self.w_i = walker_index
 
-    def set_run_dir(self, run_dir="./ini_conds_walker_", append_traj=True):
+    def set_run_dir(self, run_dir="./ini_conds_walker_", append_traj=False):
         """Where the md logs will be written, if the directory does not exist, it will create it."""
         self.run_dir = run_dir
         if not os.path.exists(self.run_dir + str(self.w_i)) and world.rank == 0:
