@@ -246,9 +246,7 @@ class AMS:
             self._pick_ini_cond(rep_index=i)
             self._until_r_or_p(i, 0)
             self._write_checkpoint()
-        self.current_p = 0
-        for i in range(self.n_rep):
-            self.current_p += self.rep_weights[i][-1]
+        self.current_p = np.sum([w[-1] for w in self.rep_weights])
         self.initialized = True
         self._write_checkpoint()
 
@@ -306,7 +304,7 @@ class AMS:
             for i in range(self.n_rep):
                 self.rep_weights[i].append(
                     self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-            self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
+            self.current_p = np.sum([w[-1] for w in self.rep_weights])
             self.finished = True
             self.success = False
             self._write_checkpoint()
@@ -326,7 +324,7 @@ class AMS:
         # update probability and weights
         for i in range(self.n_rep):
             self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
+        self.current_p = np.sum([w[-1] for w in self.rep_weights])
         return True
 
     def _finish_iteration(self):
@@ -354,7 +352,7 @@ class AMS:
         # update probability and weights
         for i in range(self.n_rep):
             self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
+        self.current_p = np.sum([w[-1] for w in self.rep_weights])
 
     def p_ams(self):
         p = 0
@@ -488,9 +486,7 @@ class AMS:
                 if not self.initialized:
                     if self.current_rep + 1 == self.n_rep:
                         self.initialized = True
-                        self.current_p = 0
-                        for i in range(self.n_rep):
-                            self.current_p += self.rep_weights[i][-1]
+                        self.current_p = np.sum([w[-1] for w in self.rep_weights])
                     else:
                         self.current_rep += 1
                         self._pick_ini_cond(rep_index=self.current_rep)
@@ -507,12 +503,12 @@ class AMS:
                         for i in range(self.n_rep):
                             self.rep_weights[i].append(
                                 self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-                        self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
+                        self.current_p = np.sum([w[-1] for w in self.rep_weights])
                         if len(killed) == self.n_rep:
                             for i in range(self.n_rep):
                                 self.rep_weights[i].append(
                                     self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-                            self.current_p = self.current_p * ((self.n_rep - len(self.killed[-1])) / self.n_rep)
+                            self.current_p = np.sum([w[-1] for w in self.rep_weights])
                             self.finished = True
                             self.success = False
                             self._write_checkpoint()
