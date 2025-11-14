@@ -9,6 +9,7 @@ description = "Adaptive Multilevel Splitting tools for molecular dynamics simula
 authors = [
     {name = "Thomas Pigeon", email = "thomas.pigeon@ifpen.fr"},
     {name = "Hadrien Vroylandt", email = "hadrien.vroylandt@unicaen.fr"},
+    {name = "Pierre Marmey", email = "pierre.marmey2@ifpen.fr"},
 ]
 dependencies = [
     "numpy>=1.22",

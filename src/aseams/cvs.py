@@ -498,7 +498,7 @@ class CollectiveVariables:
             return in_p
         else:
             if self.p_crit == "above":
-                return [self.cv_r(atoms) >= self.in_p_boundary]
+                return [self.cv_p(atoms) >= self.in_p_boundary]
             if self.p_crit == "below":
                 return [self.cv_p(atoms) <= self.in_p_boundary]
             if self.p_crit == "between":
