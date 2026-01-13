@@ -4,7 +4,7 @@ import numpy as np
 class CollectiveVariables:
     """Class to gather collective variables used to sample initial conditions and run AMS"""
 
-    def __init__(self, cv_r, cv_p, reaction_coordinate, rc_grad=None):
+    def __init__(self, cv_r, cv_p, reaction_coordinate, rc_grad=None, cv_r_grad=None):
         """
         Parameters:
 
@@ -36,6 +36,11 @@ class CollectiveVariables:
                 raise ValueError("""reaction_coordinate gradient must be a function""")
         else:
             self.rc_grad = None
+        if cv_r_grad is not None:
+            if (isinstance(cv_r_grad, list) and np.prod([inspect.isfunction(_) for _ in cv_r_grad])) or inspect.isfunction(cv_r_grad):
+                self.cv_r_grad = cv_r_grad
+            else:
+                raise ValueError("""cv_r gradient must be a function or a list of functions""")
         self.r_crit = None
         self.p_crit = None
         self.in_r_boundary = None

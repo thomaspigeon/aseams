@@ -8,16 +8,120 @@ Provides:
     - MultiWalkerSampler
     - FileBasedSampler
 """
-
+import inspect
 import os, json, time, shutil
 import numpy as np
+import math
 import ase.units as units
+from scipy.optimize import newton
+from scipy.stats import norm
 from abc import ABC, abstractmethod
 from ase.io import Trajectory, read, write
 from ase.parallel import world, paropen, barrier
 from ase.constraints import FixCom
 
 from src.aseams.ams import NumpyEncoder
+
+
+def sample_rayleigh(sigma, rng=None):
+    """
+    Sample from a Rayleigh distribution: p(v) = (v/sigma^2) * exp(-v^2 / (2*sigma^2))
+
+    Parameters:
+    -----------
+    sigma : float
+        The scale parameter of the Rayleigh distribution (sqrt(kT/m)).
+    rng : numpy.random.Generator, optional
+        Random number generator.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    # Inverse CDF method for Rayleigh: v = sigma * sqrt(-2 * ln(1 - U))
+    u = rng.uniform(1e-10, 1.0 - 1e-10)
+    return sigma * math.sqrt(-2.0 * math.log(1.0 - u))
+
+
+def _get_v_r_constants(u_R, sigma_R):
+    """
+    Calculate the P(0) and Z_star constants required for the CDF inversion.
+
+    Parameters:
+    -----------
+    u_R : float
+        The projection of the bias velocity shift (u_alpha) onto the normal vector e_R.
+    sigma_R : float
+        The standard deviation of the thermal velocity component along the normal e_R.
+
+    Returns:
+    --------
+    p_0 : float
+        The value of the primitive function P(t) at t=0.
+    z_star : float
+        The normalization constant (partition function) for the biased flux distribution.
+    """
+    # Using scipy.stats.norm.cdf for the standard normal cumulative distribution function (Φ)
+    prefix = math.sqrt(2 * math.pi) * sigma_R * u_R
+
+    # P(0) calculation
+    term1_0 = - (sigma_R ** 2) * math.exp(-(u_R ** 2) / (2 * sigma_R ** 2))
+    term2_0 = prefix * norm.cdf(-u_R / sigma_R)
+    p_0 = term1_0 + term2_0
+
+    # Z_star = P(inf) - P(0) where P(inf) = prefix
+    z_star = prefix - p_0
+    return p_0, z_star
+
+
+def sample_biased_v_r(u_R, sigma_R, rng=None):
+    """
+    Sample the normal velocity component v_R by inverting the Cumulative Distribution Function (CDF)
+    using the scipy.optimize.newton root-finding algorithm.
+
+    Parameters:
+    -----------
+    u_R : float
+        The projection of the bias velocity shift onto the normal vector e_R.
+    sigma_R : float
+        The standard deviation of the thermal velocity along the normal.
+    rng : numpy.random.Generator, optional
+        Random number generator for reproducibility.
+
+    Returns:
+    --------
+    v_R : float
+        The sampled biased normal velocity (always positive).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # Draw a uniform random number in (0, 1)
+    U = rng.uniform(1e-10, 1.0 - 1e-10)
+    p_0, z_star = _get_v_r_constants(u_R, sigma_R)
+    target = p_0 + U * z_star
+
+    # Define the function G(r) = P(r) - Target, whose root we are seeking
+    def G(r):
+        diff = (r - u_R) / sigma_R
+        p_r = -(sigma_R ** 2) * math.exp(-0.5 * diff ** 2) + \
+              math.sqrt(2 * math.pi) * sigma_R * u_R * norm.cdf(diff)
+        return p_r - target
+
+    # Define the derivative G'(r), which is the biased flux density kernel
+    def G_prime(r):
+        return r * math.exp(-0.5 * ((r - u_R) / sigma_R) ** 2)
+
+    # Initial guess: strictly positive value, typically the expected value or shift
+    x0 = max(1e-3, u_R + sigma_R)
+
+    try:
+        # Call SciPy's Newton routine (Quadratic convergence)
+        r_root = newton(func=G, x0=x0, fprime=G_prime, tol=1.48e-08, maxiter=50)
+    except RuntimeError:
+        # Fallback to brentq (slower but guaranteed convergence) if Newton fails
+        from scipy.optimize import brentq
+        r_root = brentq(G, 0, u_R + 10 * sigma_R)
+
+    return max(1e-12, r_root)
 
 
 # =====================================================================
@@ -28,6 +132,16 @@ class BaseInitialConditionSampler(ABC):
     """Abstract base class for all initial condition samplers."""
 
     def __init__(self, xi, cv_interval=1):
+        """
+        Initialize the sampler with collective variables and recording interval.
+
+        Parameters:
+        -----------
+        xi : CollectiveVariables
+            Object containing the reaction coordinate and boundary definitions.
+        cv_interval : int
+            Interval (in steps) at which collective variables are evaluated.
+        """
         if type(xi).__name__ != "CollectiveVariables":
             raise ValueError("xi must be a CollectiveVariables object")
         if not isinstance(cv_interval, int) or cv_interval < 0:
@@ -37,43 +151,149 @@ class BaseInitialConditionSampler(ABC):
         self.cv_interval = cv_interval
         self.ini_cond_dir = None
 
-        # shared times
+        # Shared residence times tracking
         self.t_r_sigma = None
         self.t_sigma_r = None
         self.t_r_sigma_out = None
         self.t_sigma_out = None
 
     def set_ini_cond_dir(self, ini_cond_dir="./ini_conds", clean=False):
-        """Prepare directory for initial conditions."""
+        """
+        Prepare the directory where generated initial conditions will be stored.
+
+        Parameters:
+        -----------
+        ini_cond_dir : str
+            Path to the directory.
+        clean : bool
+            If True, removes the directory if it already exists.
+        """
         self.ini_cond_dir = ini_cond_dir
         if world.rank == 0:
             if clean and os.path.exists(ini_cond_dir):
                 shutil.rmtree(ini_cond_dir)
             os.makedirs(ini_cond_dir, exist_ok=True)
 
-    def apply_rayleigh_bias(self, atoms, temp, bias_temp, resample_ortho=True, rng=None):
+    def bias_one_initial_condition_rayleigh(self, atoms, temp_phys, temp_bias, rng=None):
         """
-        Apply Rayleigh velocity bias to the system's initial conditions
-        using the reaction coordinate gradient implemented in the
-        CollectiveVariables class (self.xi).
+        Generate a biased initial condition by sampling the normal velocity component
+        from a Rayleigh distribution at a higher temperature (temp_bias).
 
-        Parameters
-        ----------
+        Parameters:
+        -----------
         atoms : ase.Atoms
-            The system whose velocities will be biased.
-        temp : float
-            Temperature in Kelvin (reference thermal temperature).
-        bias_temp : float
-            Temperature parameter for the Rayleigh bias distribution.
-        resample_ortho : bool, optional
-            Whether to resample orthogonal components from Maxwell–Boltzmann.
+            The configuration to bias.
+        temp_phys : float
+            The physical temperature of the system (Kelvin).
+        temp_bias : float
+            The increased temperature for the escape velocity (Kelvin).
         rng : np.random.Generator, optional
-            Random number generator (np.random.default_rng() by default).
+            Random number generator.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
 
-        Returns
-        -------
-        biased_atoms : ase.Atoms
-            Copy of `atoms` with biased velocities and stored reweighting factor.
+        # --- 1. Identify exit normal e_R ---
+        if 'from_which_r' in atoms.info:
+            if inspect.isfunction(self.xi.cv_r):
+                in_r_mask = [True]
+            else:
+                in_r_mask = [False for _ in self.xi.cv_r]
+                in_r_mask[atoms.info['from_which_r']] = True
+        else:
+            raise ValueError("""No "from_which_r" metadata in initial condition file, problem in sampler or cvs. 
+            There must be a problem in you sampler of definition of collective variables""")
+        if not any(in_r_mask):
+            raise ValueError("""System is not in any defined state R.
+            There must be a problem in you sampler of definition of collective variables""")
+
+        idx = np.where(in_r_mask)[0][0]
+        grad_r_func = self.xi.cv_r_grad[idx]
+        raw_grad_r = grad_r_func(atoms).flatten()
+
+        if inspect.isfunction(self.xi.cv_r):
+            condition = self.xi.r_crit
+            val_threshold = self.xi.in_r_boundary
+            current_val = self.xi.evaluate_cv_r(atoms)
+        elif isinstance(self.xi.cv_r, list):
+            condition = self.xi.r_crit[idx]
+            val_threshold = self.xi.in_r_boundary[idx]
+            current_val = self.xi.evaluate_cv_r(atoms)[idx]
+        else:
+            raise ValueError("""Problem of CollectiveVariables definition""")
+
+        # Select the outward normal direction
+        if condition == 'below':
+            e_R = raw_grad_r
+        elif condition == 'above':
+            e_R = -raw_grad_r
+        elif condition == 'between':
+            v_min, v_max = val_threshold
+            e_R = raw_grad_r if abs(current_val - v_max) < abs(current_val - v_min) else -raw_grad_r
+        else:
+            e_R = raw_grad_r
+
+        e_R /= np.linalg.norm(e_R)
+
+        # --- 2. Physics Parameters ---
+        masses = atoms.get_masses()
+        m_3n = np.repeat(masses, 3)
+        m_eff_R = np.dot(e_R, m_3n * e_R)
+
+        # Sigmas for the Rayleigh distribution (normal component)
+        sigma_phys = math.sqrt(units.kB * temp_phys / m_eff_R)
+        sigma_bias = math.sqrt(units.kB * temp_bias / m_eff_R)
+
+        # --- 3. Sampling ---
+        # Normal component: Rayleigh at biased temperature
+        v_R_sampled = sample_rayleigh(sigma_bias, rng=rng)
+
+        # Tangential components: standard Maxwell-Boltzmann at physical temperature
+        v_thermal_3n = np.sqrt(units.kB * temp_phys / m_3n)
+        v_full_MB = rng.normal(0, v_thermal_3n)
+
+        # Remove any normal component from the thermal MB draw and add our biased v_R
+        v_perp = v_full_MB - np.dot(v_full_MB, e_R) * e_R
+        v_final_flat = v_R_sampled * e_R + v_perp
+
+        # --- 4. Importance Sampling Weight ---
+        # Weight W = p_phys(v_R) / p_bias(v_R)
+        # W = (T_bias / T_phys) * exp[ -(m_eff*v_R^2 / 2k) * (1/T_phys - 1/T_bias) ]
+
+        temp_ratio = temp_bias / temp_phys
+        energy_factor = (m_eff_R * v_R_sampled ** 2) / (2.0 * units.kB)
+        diff_beta = (1.0 / temp_phys) - (1.0 / temp_bias)
+
+        weight = temp_ratio * math.exp(-energy_factor * diff_beta)
+
+        # --- 5. Finalize Atoms object ---
+        atoms.set_velocities(v_final_flat.reshape((-1, 3)))
+        if not hasattr(atoms, 'info'):
+            atoms.info = {}
+        atoms.info['weight'] = weight
+
+        return atoms
+
+    def bias_one_initial_condition_flux(self, atoms, alpha, temp, rng=None):
+        """
+        Generate a biased velocity vector for a single configuration and compute the
+        associated Importance Sampling (IS) weight.
+
+        Parameters:
+        -----------
+        atoms : ase.Atoms
+            The atomic configuration (positions) to be biased.
+        alpha : float
+            Dimensionless bias parameter (alpha=0 corresponds to unbiased flux).
+        temp : float
+            Simulation temperature in Kelvin.
+        rng : numpy.random.Generator, optional
+            Random number generator.
+
+        Returns:
+        --------
+        atoms : ase.Atoms
+            The configuration with updated biased velocities and the IS weight in atoms.info.
         """
         if rng is None:
             rng = np.random.default_rng()
@@ -84,126 +304,197 @@ class BaseInitialConditionSampler(ABC):
                 "CollectiveVariables object (self.xi) must have a callable 'rc_grad(atoms)' "
                 "returning the reaction coordinate gradient (n_atoms, 3)."
             )
+        if not hasattr(self.xi, "cv_r_grad") or self.xi.cv_r_grad is None:
+            raise AttributeError(
+                "CollectiveVariables object (self.xi) must have a callable 'cv_r_grad(atoms)' "
+                "returning the gradient of the cv_r function(s) (n_atoms, 3)."
+            )
 
-        # --- Compute and normalize the reaction coordinate gradient ---
-        normal = np.array(self.xi.rc_grad(atoms), dtype=float)
-        if normal.ndim != 2 or normal.shape[1] != 3:
-            raise ValueError(f"Invalid rc_grad shape {normal.shape}; expected (n_atoms, 3).")
+        beta = 1 / (units.kB * temp)
+        masses = atoms.get_masses()
+        m_3n = np.repeat(masses, 3)  # Mass vector flattened to 3N
 
-        masses = atoms.get_masses()[:, np.newaxis]  # shape (n_atoms, 1)
-        normal_flat = normal.ravel()
-
-        # Proper mass-weighted normalization (∑_i n_i·n_i/m_i = 1)
-        norm = np.sqrt(np.dot(normal_flat, (normal / masses).ravel()))
-        normal /= norm
-
-        # --- Generate Rayleigh-distributed normal velocity magnitude ---
-        normal_component = rng.rayleigh(scale=1.0)
-        weight = (bias_temp / temp) * np.exp(-0.5 * (normal_component ** 2) * (bias_temp / temp - 1.0))
-
-        # Convert to physical momentum magnitude
-        normal_component *= np.sqrt(units.kB * bias_temp)
-
-        # --- Initialize new momenta array ---
-        new_momenta = np.zeros_like(atoms.get_momenta())
-
-        # Normal contribution (mass-weighted)
-        new_momenta += normal_component * normal
-
-        # --- Orthogonal component ---
-        if resample_ortho:
-            # Draw random Gaussian orthogonal components
-            ortho_momenta = rng.normal(size=(len(masses), 3)) * np.sqrt(masses * units.kB * temp)
+        # 1. Geometrical Directions Calculation
+        # Identify the index of the current state R
+        if 'from_which_r' in atoms.info:
+            if inspect.isfunction(self.xi.cv_r):
+                in_r_mask = [True]
+            else:
+                in_r_mask = [False for _ in self.xi.cv_r]
+                in_r_mask[atoms.info['from_which_r']] = True
         else:
-            ortho_momenta = atoms.get_momenta().copy()
+            raise ValueError("""No "from_which_r" metadata in initial condition file, problem in sampler or cvs. 
+            There must be a problem in you sampler of definition of collective variables""")
+        if not any(in_r_mask):
+            raise ValueError("""System is not in any defined state R.
+            There must be a problem in you sampler of definition of collective variables""")
 
-        # Remove projection along the normal direction
-        proj = (normal * (ortho_momenta / masses)).sum()
-        ortho_momenta -= normal * proj
+        idx = np.where(in_r_mask)[0][0]
 
-        # Add orthogonal part
-        new_momenta += ortho_momenta
+        # Retrieve the gradient for the corresponding cv_r function
+        grad_r_func = self.xi.cv_r_grad[idx]
+        raw_grad_r = grad_r_func(atoms).flatten()
 
-        # --- Create output object ---
-        biased_atoms = atoms.copy()
-        biased_atoms.calc = atoms.calc
-        biased_atoms.set_momenta(new_momenta)
-        biased_atoms.info["weight"] = weight
+        # Determine the direction of the normal e_R (must be outward from R)
+        if inspect.isfunction(self.xi.cv_r):
+            condition = self.xi.r_crit
+            val_threshold = self.xi.in_r_boundary
+            current_val = self.xi.evaluate_cv_r(atoms)
+        elif isinstance(self.xi.cv_r, list):
+            condition = self.xi.r_crit[idx]
+            val_threshold = self.xi.in_r_boundary[idx]
+            current_val = self.xi.evaluate_cv_r(atoms)[idx]
+        else:
+            raise ValueError("""Problem of CollectiveVariables definition""")
 
-        return biased_atoms
+        if condition == 'below':
+            # R = {q | zeta <= val}. Exiting means increasing zeta. e_R = +grad(zeta)
+            e_R = raw_grad_r
+        elif condition == 'above':
+            # R = {q | zeta >= val}. Exiting means decreasing zeta. e_R = -grad(zeta)
+            e_R = -raw_grad_r
+        elif condition == 'between':
+            # R = {q | v_min <= zeta <= v_max}.
+            # We check which boundary is closer to define the exit face
+            v_min, v_max = val_threshold
+            if abs(current_val - v_max) < abs(current_val - v_min):
+                e_R = raw_grad_r  # Exiting through the upper bound
+            else:
+                e_R = -raw_grad_r  # Exiting through the lower bound
+        else:
+            e_R = raw_grad_r
+
+        # Normalize the outward normal e_R
+        e_R /= np.linalg.norm(e_R)
+
+        # Bias Direction (Reaction Coordinate)
+        grad_xi = self.xi.rc_grad(atoms).flatten()
+        e_xi = grad_xi / np.linalg.norm(grad_xi)
+
+        # 2. Mass and Variance Parameters
+        m_xi = np.dot(e_xi, m_3n * e_xi)  # Effective mass in the bias direction
+        m_eff_R = np.dot(e_R, m_3n * e_R)  # Effective mass in the normal direction
+        sigma_R = 1.0 / math.sqrt(beta * m_eff_R)
+
+        # 3. Define the Bias Shift Vector u_alpha
+        v_thermal_xi = 1.0 / math.sqrt(beta * m_xi)
+        u_alpha = alpha * v_thermal_xi * e_xi
+        u_R = np.dot(u_alpha, e_R)
+
+        # 4. Normal Velocity Sampling (v_R)
+        v_R_sampled = sample_biased_v_r(u_R, sigma_R, rng=rng)
+
+        # 5. Tangential Components Sampling (Shifted Gaussian)
+        # Generate thermal noise shifted by u_alpha
+        v_thermal_3n = 1.0 / np.sqrt(beta * m_3n)
+        v_full = u_alpha + rng.normal(0, v_thermal_3n)
+
+        # Projection to ensure v_R_sampled is preserved on the normal axis
+        v_perp = v_full - np.dot(v_full, e_R) * e_R
+        v_final_flat = v_R_sampled * e_R + v_perp
+
+        # 6. Weight Calculation W(v)
+        p_0, z_star = _get_v_r_constants(u_R, sigma_R)
+        R_Z = z_star / (sigma_R ** 2)
+
+        # Mass-weighted projection for the exponential argument
+        v_dot_M_exi = np.dot(v_final_flat * m_3n, e_xi)
+        arg_exp = -alpha * math.sqrt(beta / m_xi) * v_dot_M_exi + (alpha ** 2 / 2.0)
+        weight = R_Z * math.exp(arg_exp)
+
+        # Update the Atoms object
+        atoms.set_velocities(v_final_flat.reshape((-1, 3)))
+        if not hasattr(atoms, 'info'):
+            atoms.info = {}
+        atoms.info['weight'] = weight
+
+        return atoms
 
     def bias_initial_conditions(
-        self,
-        input_dir,
-        output_dir,
-        temp,
-        bias_temp,
-        resample_ortho=True,
-        rng=None,
-        overwrite=False,
+            self,
+            input_dir,
+            output_dir,
+            temp,
+            alpha=0.0,
+            temp_bias=None,
+            method='flux',
+            rng=None,
+            overwrite=False,
     ):
         """
-        Apply Rayleigh velocity bias to all initial conditions in a directory.
+        Apply velocity biasing to all initial conditions in a directory using either
+        Flux Biasing or Rayleigh Biasing.
 
-        Parameters
-        ----------
+        Parameters:
+        -----------
         input_dir : str
-            Path to the directory containing the original initial conditions (.extxyz files).
+            Path to the directory containing the original .extxyz configurations.
         output_dir : str
-            Path where the biased initial conditions will be written.
+            Path where the biased configurations will be written.
         temp : float
-            Reference temperature (in Kelvin).
-        bias_temp : float
-            Rayleigh biasing temperature (in Kelvin).
-        resample_ortho : bool, optional
-            Whether to resample orthogonal velocity components (default: True).
+            The physical reference temperature (Kelvin).
+        alpha : float, optional
+            Dimensionless bias parameter for 'flux' method. Defaults to 0.0.
+        temp_bias : float, optional
+            The increased temperature (Kelvin) for the 'rayleigh' method.
+            Required if method='rayleigh'.
+        method : str
+            The biasing scheme to use: 'flux' or 'rayleigh'. Defaults to 'flux'.
         rng : np.random.Generator, optional
-            Random number generator (default: np.random.default_rng()).
+            Random number generator for reproducibility.
         overwrite : bool, optional
-            Whether to overwrite existing files in output_dir (default: False).
+            If True, existing files in output_dir will be overwritten.
 
-        Returns
-        -------
+        Returns:
+        --------
         summary : dict
-            Summary dictionary with keys:
-                - "n_processed": number of files processed,
-                - "weights": list of bias weights,
-                - "output_files": list of generated file paths.
+            A dictionary containing processing statistics, weights, and file paths.
         """
-        if rng is None:
-            rng = np.random.default_rng()
+        # 1. Validation and Directory Setup
+        if method not in ['flux', 'rayleigh']:
+            raise ValueError("method must be either 'flux' or 'rayleigh'")
 
-        # Check directories
+        if method == 'rayleigh' and temp_bias is None:
+            raise ValueError("temp_bias must be provided when using method='rayleigh'")
+
         if not os.path.isdir(input_dir):
             raise NotADirectoryError(f"Input directory not found: {input_dir}")
 
-        os.makedirs(output_dir, exist_ok=True)
+        if world.rank == 0:
+            os.makedirs(output_dir, exist_ok=True)
+        barrier()
 
-        # Collect all .extxyz files
-        input_files = sorted(
-            [f for f in os.listdir(input_dir) if f.endswith(".extxyz")]
-        )
+        # 2. File Collection
+        input_files = sorted([f for f in os.listdir(input_dir) if f.endswith(".extxyz")])
         if not input_files:
             raise FileNotFoundError(f"No .extxyz files found in {input_dir}")
 
         weights = []
         output_files = []
 
+        # 3. Processing Loop
         for fname in input_files:
             in_path = os.path.join(input_dir, fname)
             out_path = os.path.join(output_dir, fname)
 
             if os.path.exists(out_path) and not overwrite:
-                print(f"Skipping existing file: {out_path}")
+                if world.rank == 0:
+                    print(f"Skipping existing file: {out_path}")
                 continue
 
-            # Read Atoms object
             atoms = read(in_path)
-            # Apply Rayleigh bias
-            biased_atoms = self.apply_rayleigh_bias(
-                atoms, temp=temp, bias_temp=bias_temp,
-                resample_ortho=resample_ortho, rng=rng
-            )
+
+            # Select the biasing method
+            if method == 'flux':
+                # Uses the Newton-Raphson scheme with shift alpha
+                biased_atoms = self.bias_one_initial_condition_flux(
+                    atoms, alpha=alpha, temp=temp, rng=rng
+                )
+            else:
+                # Uses the Rayleigh distribution at temp_bias
+                biased_atoms = self.bias_one_initial_condition_rayleigh(
+                    atoms, temp_phys=temp, temp_bias=temp_bias, rng=rng
+                )
 
             # Save to output directory
             write(out_path, biased_atoms, format="extxyz")
@@ -213,6 +504,7 @@ class BaseInitialConditionSampler(ABC):
 
         summary = {
             "n_processed": len(output_files),
+            "method_used": method,
             "weights": weights,
             "output_files": output_files,
         }
@@ -376,7 +668,9 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 self.t_r_sigma[self.last_r_visited][-1] += self.cv_interval
-
+            if not hasattr(self.dyn.atoms, 'info'):
+                self.dyn.atoms.info = {}
+            self.dyn.atoms.info['from_which_r'] = self.last_r_visited
             fname = f"{self.ini_cond_dir}/{self.n_ini_conds_already + n_cdt + 1}.extxyz"
             write(fname, self.dyn.atoms, format='extxyz')
             self.going_back_to_r, self.going_to_sigma = True, False
@@ -455,6 +749,9 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.t_sigma_r[self.last_r_visited][-1] += 1
             if above_sigma and self.going_to_sigma:
                 self.going_to_sigma = False
+                if not hasattr(self.dyn.atoms, 'info'):
+                    self.dyn.atoms.info = {}
+                self.dyn.atoms.info['from_which_r'] = self.last_r_visited
                 fname = self.ini_cond_dir + str(self.n_ini_conds_already + 1) + ".extxyz"
                 write(fname, self.dyn.atoms, format='extxyz')
                 self.going_back_to_r = True
@@ -712,6 +1009,9 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 self.t_r_sigma[self.last_r_visited][-1] += self.cv_interval
+            if not hasattr(self.dyn.atoms, 'info'):
+                self.dyn.atoms.info = {}
+            self.dyn.atoms.info['from_which_r'] = self.last_r_visited
             fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(
                 n_ini_conds_already + n_cdt + 1) + ".extxyz"
             write(fname, self.dyn.atoms, format='extxyz')
@@ -785,6 +1085,9 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.t_sigma_r[self.last_r_visited][-1] += 1
             if above_sigma and self.going_to_sigma:
                 self.going_to_sigma = False
+                if not hasattr(self.dyn.atoms, 'info'):
+                    self.dyn.atoms.info = {}
+                self.dyn.atoms.info['from_which_r'] = self.last_r_visited
                 fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(
                     self.n_ini_conds_already + 1) + ".extxyz"
                 write(fname, self.dyn.atoms, format='extxyz')
@@ -860,12 +1163,15 @@ class FileBasedSampler(BaseInitialConditionSampler):
             raise ValueError("ini_cond_dir not set.")
 
         if isinstance(self.xi.cv_r, list):
-            ncv = len(self.xi.cv_r)
-            t_r_sigma = [[] for _ in range(ncv)]
-            t_sigma_r = [[] for _ in range(ncv)]
+            self.t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
+            self.t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
+            self.t_r_sigma_out = [[] for i in range(len(self.xi.cv_r))]
+            self.t_sigma_out = [[] for i in range(len(self.xi.cv_r))]
         else:
-            t_r_sigma = [[]]
-            t_sigma_r = [[]]
+            self.t_r_sigma = [[]]
+            self.t_sigma_r = [[]]
+            self.t_r_sigma_out = [[]]
+            self.t_sigma_out = [[]]
 
         n_cdt, n_stp = 0, 0
         n_ini = len([f for f in os.listdir(self.ini_cond_dir) if f.endswith(".extxyz")])
@@ -878,24 +1184,33 @@ class FileBasedSampler(BaseInitialConditionSampler):
         while n_stp < n_steps:
             which_r = np.where(self.xi.in_which_r(traj[n_stp])
                                == np.max(self.xi.in_which_r(traj[n_stp])))[0][0]
-            t_r_sigma[which_r].append(0)
+            self.t_r_sigma[which_r].append(0)
             while not self.xi.above_sigma(traj[n_stp]) and n_stp < n_steps:
                 n_stp += self.cv_interval
                 if n_stp >= n_steps:
-                    t_r_sigma[which_r].pop()
+                    self.t_r_sigma[which_r].pop()
                     break
-                t_r_sigma[which_r][-1] += self.cv_interval
+                self.t_r_sigma[which_r][-1] += self.cv_interval
 
             if n_stp >= n_steps: break
             fname = f"{self.ini_cond_dir}/{n_ini + n_cdt + 1}.extxyz"
-            write(fname, traj[n_stp], format='extxyz')
-            t_sigma_r[which_r].append(0)
+            at = traj[n_stp].copy()
+            if not hasattr(at, 'info'):
+                at.info = {}
+            at.info['from_which_r'] = which_r
+            write(fname, at, format='extxyz')
+            self.t_sigma_r[which_r].append(0)
 
             while not self.xi.in_r(traj[n_stp]) and n_stp < n_steps:
                 n_stp += self.cv_interval
                 if n_stp >= n_steps:
-                    t_sigma_r[which_r].pop()
+                    self.t_sigma_r[which_r].pop()
                     break
-                t_sigma_r[which_r][-1] += self.cv_interval
+                if self.xi.is_out_of_r_zone(traj[n_stp]):
+                    t_sigma_out = self.t_sigma_r[self.which_r].pop(-1)
+                    t_r_sigma_out = self.t_r_sigma[self.which_r].pop(-1)
+                    self.t_sigma_out[self.which_r].append(t_sigma_out)
+                    self.t_r_sigma_out[self.which_r].append(t_r_sigma_out)
+                self.t_sigma_r[which_r][-1] += self.cv_interval
             n_cdt += 1
-        return t_r_sigma, t_sigma_r
+
