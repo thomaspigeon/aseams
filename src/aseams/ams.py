@@ -359,7 +359,7 @@ class AMS:
     def p_ams(self):
         p = 0
         if not self.finished:
-            print("AMS not run")
+            parprint("AMS not run")
             return 0.0
         for i in range(self.n_rep):
             if self.z_maxs[i] >= np.inf:  # If in B
