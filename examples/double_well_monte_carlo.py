@@ -79,7 +79,7 @@ def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, max_steps=10000
 # 1. PARAMÈTRES DE LA SIMULATION
 # =====================================================================
 # Paramètres Monte Carlo
-n_samples = 500  # Pool de conditions initiales
+n_samples = 1000  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
 temperature_K = 300.0
@@ -150,7 +150,7 @@ if world.rank == 0:
         f.write(f"Friction (fs^-1)        : {friction * units.fs}\n")
         f.write(f"Potentiel (a, d1, d2)   : {a_param}, {d1_param}, {d2_param}\n")
         f.write(f"N_samples (Initial)     : {n_samples}\n\n")
-        f.write(f"{'Méthode':<12} | {'Param':<10} | {'P_moy':<15} | {'Erreur-standard':<15}\n")
+        f.write(f"{'Method':<12} | {'Param':<10} | {'P_moy':<15} | {'Std. err.':<15} | {'Rel. err.'}\n")
         f.write("-" * 60 + "\n")
 
 
@@ -194,7 +194,7 @@ p_est, p_var, _ = run_direct_mc_batch(unbiased_dir, cv, temperature_K, friction,
                                       max_steps=10000, calc=DoubleWell(a=0.1, rc=100.0))
 if world.rank == 0:
     with open(filename, "a") as f:
-        f.write(f"{'Unbiased':<12} | {'_':<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e}\n")
+        f.write(f"{'Unbiased':<12} | {'_':<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e} | {math.sqrt(p_var)/p_est:<15.5e}\n")
 
 # --- CAS 2 : FLUX BIASING ---
 for alpha in alphas:
@@ -210,7 +210,7 @@ for alpha in alphas:
                                           max_steps=10000, calc=DoubleWell(a=0.1, rc=100.0))
     if world.rank == 0:
         with open(filename, "a") as f:
-            f.write(f"{'Flux':<12} | {alpha:<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e}\n")
+            f.write(f"{'Flux':<12} | {alpha:<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e} | {math.sqrt(p_var)/p_est:<15.5e}\n")
 
 # --- CAS 3 : RAYLEIGH BIASING ---
 for tb in temp_biases:
@@ -226,6 +226,6 @@ for tb in temp_biases:
                                           max_steps=10000, calc=DoubleWell(a=0.1, rc=100.0))
     if world.rank == 0:
         with open(filename, "a") as f:
-            f.write(f"{'Rayleigh':<12} | {tb:<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e}\n")
+            f.write(f"{'Rayleigh':<12} | {tb:<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e} | {math.sqrt(p_var)/p_est:<15.5e}\n")
 
 parprint(f"\nÉtude terminée. Voir {filename} pour les résultats.")

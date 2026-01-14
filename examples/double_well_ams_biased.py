@@ -17,8 +17,8 @@ from ase.parallel import parprint, world, barrier
 # 1. PARAMÈTRES DE LA SIMULATION
 # =====================================================================
 # Paramètres AMS
-n_ams = 5  # Nombre d'exécutions AMS par point
-n_rep = 25  # Nombre de répliques
+n_ams = 10  # Nombre d'exécutions AMS par point
+n_rep = 100  # Nombre de répliques
 n_samples = n_ams * n_rep  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
@@ -90,8 +90,8 @@ sampler = SingleWalkerSampler(dyn_ini,
                               cv_interval=1,
                               fixcm=True,
                               rng=rng_ini)
-sampler.set_run_dir("./ini_raw", append_traj=False)
-sampler.set_ini_cond_dir("./ini_raw", clean=False)
+sampler.set_run_dir("./ini_ams_raw", append_traj=False)
+sampler.set_ini_cond_dir("./ini_ams_raw", clean=False)
 parprint(f"Génération de {n_samples} conditions initiales brutes...")
 sampler.sample(n_samples)
 
@@ -105,13 +105,13 @@ if world.rank == 0:
         f.write(f"COMPARAISON AMS (UNBIASED VS BIASED) - {datetime.datetime.now()}\n")
         f.write("====================================================\n\n")
         f.write("--- PARAMÈTRES DE LA DYNAMIQUE ---\n")
-        f.write(f"Température physique (K) : {temperature_K}\n")
-        f.write(f"Timestep (fs)           : {timestep / units.fs}\n")
-        f.write(f"Friction (fs^-1)        : {friction * units.fs}\n")
-        f.write(f"Potentiel (a, d1, d2)   : {a_param}, {d1_param}, {d2_param}\n")
-        f.write(f"AMS (Replicas, K_min)   : {n_rep}, 1\n")
-        f.write(f"N_samples (Initial)     : {n_ams*n_rep}\n\n")
-        f.write(f"{'Méthode':<12} | {'Param':<10} | {'P_moy':<15}| {'Erreur-standard':<15}\n")
+        f.write(f"Température physique (K)        : {temperature_K}\n")
+        f.write(f"Timestep (fs)                   : {timestep / units.fs}\n")
+        f.write(f"Friction (fs^-1)                : {friction * units.fs}\n")
+        f.write(f"Potentiel (a, d1, d2)           : {a_param}, {d1_param}, {d2_param}\n")
+        f.write(f"AMS (N_rep, K_min, M_real)      : {n_rep}, 1, {n_ams}\n")
+        f.write(f"N_samples (Initial)             : {n_ams*n_rep}\n\n")
+        f.write(f"{'Method':<12} | {'Param':<10} | {'P_moy':<15} | {'Std. err.':<15} | {'Rel. err.'}\n")
         f.write("-" * 60 + "\n")
 
 
@@ -147,7 +147,8 @@ def run_ams_batch(method_name, param_val, input_dir):
 
     if world.rank == 0:
         with open(filename, "a") as f:
-            f.write(f"{method_name:<12} | {param_val:<10} | {mean_p:<15.5e} | {std_p/np.sqrt(n_ams):<15.5e}\n")
+            f.write(
+                f"{method_name:<12} | {param_val:<10} | {mean_p:<15.5e} | {std_p / np.sqrt(n_ams):<15.5e} | {(std_p / np.sqrt(n_ams)) / mean_p:<15.5e}\n")
 
 # =====================================================================
 # 5. EXÉCUTION DES DIFFÉRENTS CAS
@@ -155,12 +156,12 @@ def run_ams_batch(method_name, param_val, input_dir):
 
 # --- CAS 1 : UNBIASED (Référence) ---
 # On prépare un dossier où les poids sont forcés à 1.0 (sans modification de vitesses)
-unbiased_dir = "./ini_unbiased"
+unbiased_dir = "./ini_ams_unbiased"
 if world.rank == 0:
     if os.path.exists(unbiased_dir): shutil.rmtree(unbiased_dir)
     os.makedirs(unbiased_dir)
-    for f in [fname for fname in os.listdir("./ini_raw") if fname.endswith('.extxyz')]:
-        at = read(os.path.join("./ini_raw", f))
+    for f in [fname for fname in os.listdir("./ini_ams_raw") if fname.endswith('.extxyz')]:
+        at = read(os.path.join("./ini_ams_raw", f))
         at.info['weight'] = 1.0
         write(os.path.join(unbiased_dir, f), at)
 barrier() # Attendre que le rang 0 finisse de copier
@@ -169,8 +170,8 @@ run_ams_batch("Unbiased_ams", "_", unbiased_dir)
 
 # --- CAS 2 : FLUX BIASING ---
 for alpha in alphas:
-    out_dir = f"./ini_flux_{alpha}"
-    sampler.bias_initial_conditions(input_dir="./ini_raw",
+    out_dir = f"./ini_ams_flux_{alpha}"
+    sampler.bias_initial_conditions(input_dir="./ini_ams_raw",
                                     output_dir=out_dir,
                                     method='flux',
                                     temp=temperature_K,
@@ -181,8 +182,8 @@ for alpha in alphas:
 
 # --- CAS 3 : RAYLEIGH BIASING ---
 for tb in temp_biases:
-    out_dir = f"./ini_rayleigh_{tb}"
-    sampler.bias_initial_conditions(input_dir="./ini_raw",
+    out_dir = f"./ini_ams_rayleigh_{tb}"
+    sampler.bias_initial_conditions(input_dir="./ini_ams_raw",
                                     output_dir=out_dir,
                                     method='rayleigh',
                                     temp=temperature_K,
