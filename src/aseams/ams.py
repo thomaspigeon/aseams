@@ -221,8 +221,13 @@ class AMS:
         for i in range(self.n_rep):
             traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
             rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
-            if not len(traj) == len(rc_traj):
-                raise ValueError("Replica " + str(i) + " has a problem, rc_traj and traj are not the same length")
+            if isinstance(traj, list):
+                if not len(traj) == len(rc_traj):
+                    raise ValueError("Replica " + str(i) + " has a problem, rc_traj and traj are not the same length !")
+            else:
+                raise ValueError("""Replica """ + str(i) + """ has a problem as the trajectory is not a list. It might 
+                                    be a single configuration which should indicate that there is an issue in states 
+                                    definitions""")
 
     def _initialize(self):
         """Run the N_rep replicas from the initial condition until it enters either R or P"""

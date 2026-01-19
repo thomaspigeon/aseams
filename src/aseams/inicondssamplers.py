@@ -233,9 +233,9 @@ class BaseInitialConditionSampler(ABC):
         else:
             e_R = raw_grad_r
 
-        e_R /= np.linalg.norm(e_R)
+        #e_R /= np.linalg.norm(e_R)
 
-        # --- 2. Physics Parameters ---
+        """# --- 2. Physics Parameters ---
         masses = atoms.get_masses()
         m_3n = np.repeat(masses, 3)
         m_eff_R = np.dot(e_R, m_3n * e_R)
@@ -243,6 +243,20 @@ class BaseInitialConditionSampler(ABC):
         # Sigmas for the Rayleigh distribution (normal component)
         sigma_phys = math.sqrt(units.kB * temp_phys / m_eff_R)
         sigma_bias = math.sqrt(units.kB * temp_bias / m_eff_R)
+        """
+        # --- 2. Physics Parameters (CORRIGÉ) ---
+        masses = atoms.get_masses()
+        m_3n = np.repeat(masses, 3)
+
+        # Calcul correct de la variance projetée (Moyenne Harmonique)
+        # sigma^2 = kB * T * sum(e_i^2 / m_i)
+        inv_m_eff = np.sum((e_R ** 2) / m_3n)
+
+        # Sigmas basés sur la masse effective correcte
+        sigma_phys = math.sqrt(units.kB * temp_phys * inv_m_eff)
+        sigma_bias = math.sqrt(units.kB * temp_bias * inv_m_eff)
+
+        e_R /= np.linalg.norm(e_R)
 
         # --- 3. Sampling ---
         # Normal component: Rayleigh at biased temperature
@@ -256,9 +270,23 @@ class BaseInitialConditionSampler(ABC):
         v_perp = v_full_MB - np.dot(v_full_MB, e_R) * e_R
         v_final_flat = v_R_sampled * e_R + v_perp
 
-        # --- 4. Importance Sampling Weight ---
+        """# --- 4. Importance Sampling Weight ---
         # Weight W = p_phys(v_R) / p_bias(v_R)
         # W = (T_bias / T_phys) * exp[ -(m_eff*v_R^2 / 2k) * (1/T_phys - 1/T_bias) ]
+
+        temp_ratio = temp_bias / temp_phys
+        energy_factor = (m_eff_R * v_R_sampled ** 2) / (2.0 * units.kB)
+        diff_beta = (1.0 / temp_phys) - (1.0 / temp_bias)
+
+        weight = temp_ratio * math.exp(-energy_factor * diff_beta)
+        """
+        # --- 4. Importance Sampling Weight (CORRIGÉ avec inv_m_eff) ---
+        # Note: m_eff n'est plus utilisé directement, on utilise sigma ou inv_m_eff
+        # Energy factor = (1/2) * m_eff * v^2 = v^2 / (2 * inv_m_eff * kB) ?
+        # Non, Arg exp = - E * (beta_phys - beta_bias)
+        # E_cinetique_normale = 0.5 * M_eff * v^2 = 0.5 * (1/inv_m_eff) * v^2
+
+        m_eff_R = 1.0 / inv_m_eff  # Masse effective réelle
 
         temp_ratio = temp_bias / temp_phys
         energy_factor = (m_eff_R * v_R_sampled ** 2) / (2.0 * units.kB)
@@ -365,19 +393,33 @@ class BaseInitialConditionSampler(ABC):
             e_R = raw_grad_r
 
         # Normalize the outward normal e_R
-        e_R /= np.linalg.norm(e_R)
+        #e_R /= np.linalg.norm(e_R)
 
         # Bias Direction (Reaction Coordinate)
         grad_xi = self.xi.rc_grad(atoms).flatten()
-        e_xi = grad_xi / np.linalg.norm(grad_xi)
-
+        #e_xi = grad_xi / np.linalg.norm(grad_xi)
+        e_xi = grad_xi
+        """"
         # 2. Mass and Variance Parameters
         m_xi = np.dot(e_xi, m_3n * e_xi)  # Effective mass in the bias direction
         m_eff_R = np.dot(e_R, m_3n * e_R)  # Effective mass in the normal direction
         sigma_R = 1.0 / math.sqrt(beta * m_eff_R)
+        """
+        # 2. Mass and Variance Parameters (CORRIGÉ)
+        # Calcul correct des masses effectives inverses
+        inv_m_eff_xi = np.sum((e_xi ** 2) / m_3n)
+        inv_m_eff_R = np.sum((e_R ** 2) / m_3n)
+
+        # Sigmas corrects
+        # sigma = sqrt(kT / m_eff) = sqrt(kT * inv_m_eff) -> 1/sigma = 1/sqrt(...)
+        sigma_R = math.sqrt(units.kB * temp * inv_m_eff_R)
+        # Paramètres pour la direction de biais xi
+        # v_thermal_xi est l'écart type de la vitesse thermique selon xi
+        v_thermal_xi = math.sqrt(units.kB * temp * inv_m_eff_xi)
+        e_R /= np.linalg.norm(e_R)
+        e_xi /= np.linalg.norm(e_xi)
 
         # 3. Define the Bias Shift Vector u_alpha
-        v_thermal_xi = 1.0 / math.sqrt(beta * m_xi)
         u_alpha = alpha * v_thermal_xi * e_xi
         u_R = np.dot(u_alpha, e_R)
 
@@ -393,13 +435,30 @@ class BaseInitialConditionSampler(ABC):
         v_perp = v_full - np.dot(v_full, e_R) * e_R
         v_final_flat = v_R_sampled * e_R + v_perp
 
-        # 6. Weight Calculation W(v)
+        """# 6. Weight Calculation W(v)
         p_0, z_star = _get_v_r_constants(u_R, sigma_R)
         R_Z = z_star / (sigma_R ** 2)
 
         # Mass-weighted projection for the exponential argument
         v_dot_M_exi = np.dot(v_final_flat * m_3n, e_xi)
         arg_exp = -alpha * math.sqrt(beta / m_xi) * v_dot_M_exi + (alpha ** 2 / 2.0)
+        weight = R_Z * math.exp(arg_exp)
+        """
+        # 6. Weight Calculation W(v)
+        p_0, z_star = _get_v_r_constants(u_R, sigma_R)
+
+        # Correction Z_star: Si alpha=0, on veut weight=1.0 relative au flux
+        # Le code précédent donnait weight=1.0 pour alpha=0. C'est correct.
+        R_Z = z_star / (sigma_R ** 2)
+
+        # Mass-weighted projection (Attention ici)
+        # L'argument de l'exponentielle dépend de M_xi.
+        # arg = - alpha * (v_xi / v_thermal_xi) + ...
+        # v_xi = v . e_xi.
+
+        v_dot_xi = np.dot(v_final_flat, e_xi)
+        arg_exp = -alpha * (v_dot_xi / v_thermal_xi) + (alpha ** 2 / 2.0)
+
         weight = R_Z * math.exp(arg_exp)
 
         # Update the Atoms object
