@@ -18,12 +18,12 @@ from ase.parallel import parprint, world, barrier
 # =====================================================================
 # Paramètres AMS
 n_ams = 10  # Nombre d'exécutions AMS par point
-n_rep = 100  # Nombre de répliques
+n_rep = 25  # Nombre de répliques
 n_samples = n_ams * n_rep  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
 temperature_K = 300.0
-timestep = 1.0 * units.fs
+timestep = 1. * units.fs
 friction = 0.01 / units.fs
 max_length_iter = 10000
 
@@ -38,7 +38,7 @@ alphas = [0.0, 0.5, 1.0]  # Pour Flux Biasing
 temp_biases = [300.0, 350.0, 400.0]  # Pour Rayleigh Biasing (en Kelvin)
 
 # Random generators
-rng_ams, rng_ini, rng_dyn_ini, rng_dyn_ams, rng_bias = [np.random.default_rng(s) for s in [0, 0, 0, 0, 0]]
+rng_ini, rng_dyn_ini, rng_bias = [np.random.default_rng(s) for s in [0, 0, 0]]
 
 # =====================================================================
 # 2. SETUP DU SYSTÈME ET CVs
@@ -73,7 +73,7 @@ cv.set_in_r_boundary(1.03)
 cv.set_sigma_r_level(1.05)
 cv.set_out_of_r_zone(1.5)
 cv.set_p_crit("above")
-cv.set_in_p_boundary(1.95)
+cv.set_in_p_boundary(1.9)
 
 
 # --- Génération initiale "Raw" ---
@@ -123,7 +123,7 @@ def run_ams_batch(method_name, param_val, input_dir):
     """Lance une série de calculs AMS pour un dossier de conditions donné"""
     parprint(f"\n>>> Mode: {method_name} (Param: {param_val})")
     p_list = []
-
+    rng_ams, rng_dyn_ams = [np.random.default_rng(s) for s in [0, 0]]
     for i in range(n_ams):
         dyn_ams = Langevin(atoms,
                            timestep=timestep,

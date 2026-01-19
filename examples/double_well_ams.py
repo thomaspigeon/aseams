@@ -25,7 +25,7 @@ n_samples = n_ams * n_rep  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
 temperature_K = 300.0
-timestep = 1.0 * units.fs
+timestep = 1. * units.fs
 friction = 0.01 / units.fs
 max_length_iter = 10000
 
@@ -71,7 +71,7 @@ cv.set_in_r_boundary(1.03)
 cv.set_sigma_r_level(1.05)
 cv.set_out_of_r_zone(1.5)
 cv.set_p_crit("above")
-cv.set_in_p_boundary(1.95)
+cv.set_in_p_boundary(1.9)
 
 # =====================================================================
 # 3. INITIALISATION DU FICHIER DE RÉSULTATS

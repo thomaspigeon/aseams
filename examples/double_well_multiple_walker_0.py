@@ -27,7 +27,7 @@ MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K, rng=rng_dyn_ini
 atoms.set_constraint(FixCom())  # Fix the COM
 dyn = Langevin(atoms,
                fixcm=True,
-               timestep=1.0 * units.fs,
+               timestep=0.5 * units.fs,
                temperature_K=temperature_K,
                friction=0.001 / units.fs,
                logfile=None,
@@ -44,7 +44,7 @@ cv.set_in_r_boundary(1.03)
 cv.set_sigma_r_level(1.05)
 cv.set_out_of_r_zone(1.5)
 cv.set_p_crit("above")
-cv.set_in_p_boundary(1.95)
+cv.set_in_p_boundary(1.9)
 
 inicondsampler = MultiWalkerSampler(dyn, cv, n_walkers=2, walker_index=0, rng=rng_ini, fixcm=True)
 

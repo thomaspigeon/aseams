@@ -14,7 +14,7 @@ from src.aseams.cvs import CollectiveVariables
 from src.aseams.inicondssamplers import SingleWalkerSampler
 
 
-def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, max_steps=10000, calc=DoubleWell(a=0.1, rc=100.0)):
+def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, calc, max_steps=10000, rng_seed=0):
     """
     Runs Direct Monte Carlo for all files in a directory to estimate
     the probability of reaching P before R.
@@ -23,7 +23,7 @@ def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, max_steps=10000
     n_total = len(files)
     successes = []
     weights = []
-
+    rng_dyn_mc = np.random.default_rng(seed=rng_seed)
     for fname in files:
         atoms = read(os.path.join(input_dir, fname))
         atoms.set_constraint(FixCom())  # Fix the COM
@@ -79,11 +79,11 @@ def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, max_steps=10000
 # 1. PARAMÈTRES DE LA SIMULATION
 # =====================================================================
 # Paramètres Monte Carlo
-n_samples = 1000  # Pool de conditions initiales
+n_samples = 500  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
 temperature_K = 300.0
-timestep = 1.0 * units.fs
+timestep = 1. * units.fs
 friction = 0.01 / units.fs
 max_length_iter = 10000
 
@@ -98,8 +98,8 @@ alphas = [0.0, 0.5, 1.0]  # Pour Flux Biasing
 temp_biases = [300.0, 350.0, 400.0]  # Pour Rayleigh Biasing (en Kelvin)
 
 # Random generators
-rng_ini, rng_dyn_ini, rng_bias, rng_dyn_mc = [np.random.default_rng(s) for s in [0, 0, 0, 0]]
-
+rng_ini, rng_dyn_ini, rng_bias = [np.random.default_rng(s) for s in [0, 0, 0]]
+rng_seed = 0
 # =====================================================================
 # 2. SETUP DU SYSTÈME ET CVs
 # =====================================================================
@@ -133,7 +133,7 @@ cv.set_in_r_boundary(1.03)
 cv.set_sigma_r_level(1.05)
 cv.set_out_of_r_zone(1.5)
 cv.set_p_crit("above")
-cv.set_in_p_boundary(1.95)
+cv.set_in_p_boundary(1.9)
 
 # =====================================================================
 # 3. INITIALISATION DU FICHIER DE RÉSULTATS
@@ -191,7 +191,8 @@ if world.rank == 0:
 barrier() # Attendre que le rang 0 finisse de copier
 
 p_est, p_var, _ = run_direct_mc_batch(unbiased_dir, cv, temperature_K, friction, timestep,
-                                      max_steps=10000, calc=DoubleWell(a=0.1, rc=100.0))
+                                      max_steps=10000, calc=calc,
+                                          rng_seed=rng_seed)
 if world.rank == 0:
     with open(filename, "a") as f:
         f.write(f"{'Unbiased':<12} | {'_':<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e} | {math.sqrt(p_var)/p_est:<15.5e}\n")
@@ -206,8 +207,9 @@ for alpha in alphas:
                                     alpha=alpha,
                                     overwrite=True,
                                     rng=rng_bias)
-    p_est, p_var, _ = run_direct_mc_batch(unbiased_dir, cv, temperature_K, friction, timestep,
-                                          max_steps=10000, calc=DoubleWell(a=0.1, rc=100.0))
+    p_est, p_var, _ = run_direct_mc_batch(out_dir, cv, temperature_K, friction, timestep,
+                                          max_steps=10000, calc=calc,
+                                          rng_seed=rng_seed)
     if world.rank == 0:
         with open(filename, "a") as f:
             f.write(f"{'Flux':<12} | {alpha:<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e} | {math.sqrt(p_var)/p_est:<15.5e}\n")
@@ -222,8 +224,9 @@ for tb in temp_biases:
                                     temp_bias=tb,
                                     overwrite=True,
                                     rng=rng_bias)
-    p_est, p_var, _ = run_direct_mc_batch(unbiased_dir, cv, temperature_K, friction, timestep,
-                                          max_steps=10000, calc=DoubleWell(a=0.1, rc=100.0))
+    p_est, p_var, _ = run_direct_mc_batch(out_dir, cv, temperature_K, friction, timestep,
+                                          max_steps=10000, calc=calc,
+                                          rng_seed=rng_seed)
     if world.rank == 0:
         with open(filename, "a") as f:
             f.write(f"{'Rayleigh':<12} | {tb:<10} | {p_est:<15.5e} | {math.sqrt(p_var):<15.5e} | {math.sqrt(p_var)/p_est:<15.5e}\n")
