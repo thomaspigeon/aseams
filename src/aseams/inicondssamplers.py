@@ -8,6 +8,7 @@ Provides:
     - MultiWalkerSampler
     - FileBasedSampler
 """
+
 import inspect
 import os, json, time, shutil
 import numpy as np
@@ -20,7 +21,7 @@ from ase.io import Trajectory, read, write
 from ase.parallel import world, paropen, barrier
 from ase.constraints import FixCom
 
-from src.aseams.ams import NumpyEncoder
+from .ams import NumpyEncoder
 
 
 def sample_rayleigh(sigma, rng=None):
@@ -63,7 +64,7 @@ def _get_v_r_constants(u_R, sigma_R):
     prefix = math.sqrt(2 * math.pi) * sigma_R * u_R
 
     # P(0) calculation
-    term1_0 = - (sigma_R ** 2) * math.exp(-(u_R ** 2) / (2 * sigma_R ** 2))
+    term1_0 = -(sigma_R**2) * math.exp(-(u_R**2) / (2 * sigma_R**2))
     term2_0 = prefix * norm.cdf(-u_R / sigma_R)
     p_0 = term1_0 + term2_0
 
@@ -102,8 +103,7 @@ def sample_biased_v_r(u_R, sigma_R, rng=None):
     # Define the function G(r) = P(r) - Target, whose root we are seeking
     def G(r):
         diff = (r - u_R) / sigma_R
-        p_r = -(sigma_R ** 2) * math.exp(-0.5 * diff ** 2) + \
-              math.sqrt(2 * math.pi) * sigma_R * u_R * norm.cdf(diff)
+        p_r = -(sigma_R**2) * math.exp(-0.5 * diff**2) + math.sqrt(2 * math.pi) * sigma_R * u_R * norm.cdf(diff)
         return p_r - target
 
     # Define the derivative G'(r), which is the biased flux density kernel
@@ -119,6 +119,7 @@ def sample_biased_v_r(u_R, sigma_R, rng=None):
     except RuntimeError:
         # Fallback to brentq (slower but guaranteed convergence) if Newton fails
         from scipy.optimize import brentq
+
         r_root = brentq(G, 0, u_R + 10 * sigma_R)
 
     return max(1e-12, r_root)
@@ -127,6 +128,7 @@ def sample_biased_v_r(u_R, sigma_R, rng=None):
 # =====================================================================
 #  Base abstract class
 # =====================================================================
+
 
 class BaseInitialConditionSampler(ABC):
     """Abstract base class for all initial condition samplers."""
@@ -194,18 +196,22 @@ class BaseInitialConditionSampler(ABC):
             rng = np.random.default_rng()
 
         # --- 1. Identify exit normal e_R ---
-        if 'from_which_r' in atoms.info:
+        if "from_which_r" in atoms.info:
             if inspect.isfunction(self.xi.cv_r):
                 in_r_mask = [True]
             else:
                 in_r_mask = [False for _ in self.xi.cv_r]
-                in_r_mask[atoms.info['from_which_r']] = True
+                in_r_mask[atoms.info["from_which_r"]] = True
         else:
-            raise ValueError("""No "from_which_r" metadata in initial condition file, problem in sampler or cvs. 
-            There must be a problem in you sampler of definition of collective variables""")
+            raise ValueError(
+                """No "from_which_r" metadata in initial condition file, problem in sampler or cvs. 
+            There must be a problem in you sampler of definition of collective variables"""
+            )
         if not any(in_r_mask):
-            raise ValueError("""System is not in any defined state R.
-            There must be a problem in you sampler of definition of collective variables""")
+            raise ValueError(
+                """System is not in any defined state R.
+            There must be a problem in you sampler of definition of collective variables"""
+            )
 
         idx = np.where(in_r_mask)[0][0]
         grad_r_func = self.xi.cv_r_grad[idx]
@@ -223,17 +229,17 @@ class BaseInitialConditionSampler(ABC):
             raise ValueError("""Problem of CollectiveVariables definition""")
 
         # Select the outward normal direction
-        if condition == 'below':
+        if condition == "below":
             e_R = raw_grad_r
-        elif condition == 'above':
+        elif condition == "above":
             e_R = -raw_grad_r
-        elif condition == 'between':
+        elif condition == "between":
             v_min, v_max = val_threshold
             e_R = raw_grad_r if abs(current_val - v_max) < abs(current_val - v_min) else -raw_grad_r
         else:
             e_R = raw_grad_r
 
-        #e_R /= np.linalg.norm(e_R)
+        # e_R /= np.linalg.norm(e_R)
 
         """# --- 2. Physics Parameters ---
         masses = atoms.get_masses()
@@ -250,7 +256,7 @@ class BaseInitialConditionSampler(ABC):
 
         # Calcul correct de la variance projetée (Moyenne Harmonique)
         # sigma^2 = kB * T * sum(e_i^2 / m_i)
-        inv_m_eff = np.sum((e_R ** 2) / m_3n)
+        inv_m_eff = np.sum((e_R**2) / m_3n)
 
         # Sigmas basés sur la masse effective correcte
         sigma_phys = math.sqrt(units.kB * temp_phys * inv_m_eff)
@@ -289,16 +295,16 @@ class BaseInitialConditionSampler(ABC):
         m_eff_R = 1.0 / inv_m_eff  # Masse effective réelle
 
         temp_ratio = temp_bias / temp_phys
-        energy_factor = (m_eff_R * v_R_sampled ** 2) / (2.0 * units.kB)
+        energy_factor = (m_eff_R * v_R_sampled**2) / (2.0 * units.kB)
         diff_beta = (1.0 / temp_phys) - (1.0 / temp_bias)
 
         weight = temp_ratio * math.exp(-energy_factor * diff_beta)
 
         # --- 5. Finalize Atoms object ---
         atoms.set_velocities(v_final_flat.reshape((-1, 3)))
-        if not hasattr(atoms, 'info'):
+        if not hasattr(atoms, "info"):
             atoms.info = {}
-        atoms.info['weight'] = weight
+        atoms.info["weight"] = weight
 
         return atoms
 
@@ -328,15 +334,9 @@ class BaseInitialConditionSampler(ABC):
 
         # --- Check CollectiveVariables object ---
         if not hasattr(self.xi, "rc_grad") or self.xi.rc_grad is None:
-            raise AttributeError(
-                "CollectiveVariables object (self.xi) must have a callable 'rc_grad(atoms)' "
-                "returning the reaction coordinate gradient (n_atoms, 3)."
-            )
+            raise AttributeError("CollectiveVariables object (self.xi) must have a callable 'rc_grad(atoms)' " "returning the reaction coordinate gradient (n_atoms, 3).")
         if not hasattr(self.xi, "cv_r_grad") or self.xi.cv_r_grad is None:
-            raise AttributeError(
-                "CollectiveVariables object (self.xi) must have a callable 'cv_r_grad(atoms)' "
-                "returning the gradient of the cv_r function(s) (n_atoms, 3)."
-            )
+            raise AttributeError("CollectiveVariables object (self.xi) must have a callable 'cv_r_grad(atoms)' " "returning the gradient of the cv_r function(s) (n_atoms, 3).")
 
         beta = 1 / (units.kB * temp)
         masses = atoms.get_masses()
@@ -344,18 +344,22 @@ class BaseInitialConditionSampler(ABC):
 
         # 1. Geometrical Directions Calculation
         # Identify the index of the current state R
-        if 'from_which_r' in atoms.info:
+        if "from_which_r" in atoms.info:
             if inspect.isfunction(self.xi.cv_r):
                 in_r_mask = [True]
             else:
                 in_r_mask = [False for _ in self.xi.cv_r]
-                in_r_mask[atoms.info['from_which_r']] = True
+                in_r_mask[atoms.info["from_which_r"]] = True
         else:
-            raise ValueError("""No "from_which_r" metadata in initial condition file, problem in sampler or cvs. 
-            There must be a problem in you sampler of definition of collective variables""")
+            raise ValueError(
+                """No "from_which_r" metadata in initial condition file, problem in sampler or cvs. 
+            There must be a problem in you sampler of definition of collective variables"""
+            )
         if not any(in_r_mask):
-            raise ValueError("""System is not in any defined state R.
-            There must be a problem in you sampler of definition of collective variables""")
+            raise ValueError(
+                """System is not in any defined state R.
+            There must be a problem in you sampler of definition of collective variables"""
+            )
 
         idx = np.where(in_r_mask)[0][0]
 
@@ -375,13 +379,13 @@ class BaseInitialConditionSampler(ABC):
         else:
             raise ValueError("""Problem of CollectiveVariables definition""")
 
-        if condition == 'below':
+        if condition == "below":
             # R = {q | zeta <= val}. Exiting means increasing zeta. e_R = +grad(zeta)
             e_R = raw_grad_r
-        elif condition == 'above':
+        elif condition == "above":
             # R = {q | zeta >= val}. Exiting means decreasing zeta. e_R = -grad(zeta)
             e_R = -raw_grad_r
-        elif condition == 'between':
+        elif condition == "between":
             # R = {q | v_min <= zeta <= v_max}.
             # We check which boundary is closer to define the exit face
             v_min, v_max = val_threshold
@@ -393,11 +397,11 @@ class BaseInitialConditionSampler(ABC):
             e_R = raw_grad_r
 
         # Normalize the outward normal e_R
-        #e_R /= np.linalg.norm(e_R)
+        # e_R /= np.linalg.norm(e_R)
 
         # Bias Direction (Reaction Coordinate)
         grad_xi = self.xi.rc_grad(atoms).flatten()
-        #e_xi = grad_xi / np.linalg.norm(grad_xi)
+        # e_xi = grad_xi / np.linalg.norm(grad_xi)
         e_xi = grad_xi
         """"
         # 2. Mass and Variance Parameters
@@ -407,8 +411,8 @@ class BaseInitialConditionSampler(ABC):
         """
         # 2. Mass and Variance Parameters (CORRIGÉ)
         # Calcul correct des masses effectives inverses
-        inv_m_eff_xi = np.sum((e_xi ** 2) / m_3n)
-        inv_m_eff_R = np.sum((e_R ** 2) / m_3n)
+        inv_m_eff_xi = np.sum((e_xi**2) / m_3n)
+        inv_m_eff_R = np.sum((e_R**2) / m_3n)
 
         # Sigmas corrects
         # sigma = sqrt(kT / m_eff) = sqrt(kT * inv_m_eff) -> 1/sigma = 1/sqrt(...)
@@ -449,7 +453,7 @@ class BaseInitialConditionSampler(ABC):
 
         # Correction Z_star: Si alpha=0, on veut weight=1.0 relative au flux
         # Le code précédent donnait weight=1.0 pour alpha=0. C'est correct.
-        R_Z = z_star / (sigma_R ** 2)
+        R_Z = z_star / (sigma_R**2)
 
         # Mass-weighted projection (Attention ici)
         # L'argument de l'exponentielle dépend de M_xi.
@@ -457,28 +461,28 @@ class BaseInitialConditionSampler(ABC):
         # v_xi = v . e_xi.
 
         v_dot_xi = np.dot(v_final_flat, e_xi)
-        arg_exp = -alpha * (v_dot_xi / v_thermal_xi) + (alpha ** 2 / 2.0)
+        arg_exp = -alpha * (v_dot_xi / v_thermal_xi) + (alpha**2 / 2.0)
 
         weight = R_Z * math.exp(arg_exp)
 
         # Update the Atoms object
         atoms.set_velocities(v_final_flat.reshape((-1, 3)))
-        if not hasattr(atoms, 'info'):
+        if not hasattr(atoms, "info"):
             atoms.info = {}
-        atoms.info['weight'] = weight
+        atoms.info["weight"] = weight
 
         return atoms
 
     def bias_initial_conditions(
-            self,
-            input_dir,
-            output_dir,
-            temp,
-            alpha=0.0,
-            temp_bias=None,
-            method='flux',
-            rng=None,
-            overwrite=False,
+        self,
+        input_dir,
+        output_dir,
+        temp,
+        alpha=0.0,
+        temp_bias=None,
+        method="flux",
+        rng=None,
+        overwrite=False,
     ):
         """
         Apply velocity biasing to all initial conditions in a directory using either
@@ -510,10 +514,10 @@ class BaseInitialConditionSampler(ABC):
             A dictionary containing processing statistics, weights, and file paths.
         """
         # 1. Validation and Directory Setup
-        if method not in ['flux', 'rayleigh']:
+        if method not in ["flux", "rayleigh"]:
             raise ValueError("method must be either 'flux' or 'rayleigh'")
 
-        if method == 'rayleigh' and temp_bias is None:
+        if method == "rayleigh" and temp_bias is None:
             raise ValueError("temp_bias must be provided when using method='rayleigh'")
 
         if not os.path.isdir(input_dir):
@@ -544,16 +548,12 @@ class BaseInitialConditionSampler(ABC):
             atoms = read(in_path)
 
             # Select the biasing method
-            if method == 'flux':
+            if method == "flux":
                 # Uses the Newton-Raphson scheme with shift alpha
-                biased_atoms = self.bias_one_initial_condition_flux(
-                    atoms, alpha=alpha, temp=temp, rng=rng
-                )
+                biased_atoms = self.bias_one_initial_condition_flux(atoms, alpha=alpha, temp=temp, rng=rng)
             else:
                 # Uses the Rayleigh distribution at temp_bias
-                biased_atoms = self.bias_one_initial_condition_rayleigh(
-                    atoms, temp_phys=temp, temp_bias=temp_bias, rng=rng
-                )
+                biased_atoms = self.bias_one_initial_condition_rayleigh(atoms, temp_phys=temp, temp_bias=temp_bias, rng=rng)
 
             # Save to output directory
             write(out_path, biased_atoms, format="extxyz")
@@ -578,6 +578,7 @@ class BaseInitialConditionSampler(ABC):
 # =====================================================================
 #  Shared MD logic
 # =====================================================================
+
 
 class MDDynamicSampler(BaseInitialConditionSampler):
     """Base class for samplers that use ASE dynamics."""
@@ -604,9 +605,9 @@ class MDDynamicSampler(BaseInitialConditionSampler):
         """Reset MD atoms to given state."""
         self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
         self.dyn.atoms.set_momenta(atoms.get_momenta())
-        self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
-        self.dyn.atoms.calc.results['stress'] = atoms.get_stress(apply_constraint=False)
-        self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()
+        self.dyn.atoms.calc.results["forces"] = atoms.get_forces(apply_constraint=False)
+        self.dyn.atoms.calc.results["stress"] = atoms.get_stress(apply_constraint=False)
+        self.dyn.atoms.calc.results["energy"] = atoms.get_potential_energy()
 
     def _write_checkpoint(self, filename):
         data = {
@@ -622,7 +623,7 @@ class MDDynamicSampler(BaseInitialConditionSampler):
             "t_r_sigma": self.t_r_sigma,
             "t_sigma_out": self.t_sigma_out,
             "t_r_sigma_out": self.t_r_sigma_out,
-            "trajfile": self.trajfile
+            "trajfile": self.trajfile,
         }
         with paropen(filename, "w") as f:
             json.dump(data, f, indent=4, cls=NumpyEncoder)
@@ -656,6 +657,7 @@ class MDDynamicSampler(BaseInitialConditionSampler):
 #  Single walker sampler
 # =====================================================================
 
+
 class SingleWalkerSampler(MDDynamicSampler):
     """Sampler generating initial conditions with one MD walker."""
 
@@ -666,8 +668,7 @@ class SingleWalkerSampler(MDDynamicSampler):
         n_traj = len([f for f in os.listdir(run_dir) if f.endswith(".traj")])
         if not append_traj:
             self.trajfile = f"{run_dir}/md_traj_{n_traj}.traj"
-            traj = self.dyn.closelater(Trajectory(self.trajfile, "a", self.dyn.atoms,
-                                                  properties=['energy', 'stress', 'forces']))
+            traj = self.dyn.closelater(Trajectory(self.trajfile, "a", self.dyn.atoms, properties=["energy", "stress", "forces"]))
             self.dyn.attach(traj.write, interval=self.cv_interval)
 
     def sample(self, n_conditions=100, n_steps=None):
@@ -717,8 +718,7 @@ class SingleWalkerSampler(MDDynamicSampler):
 
         # Main loop
         while (n_cdt < n_conditions) or (n_stp < n_steps):
-            self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms)
-                                           == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
+            self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
             self.t_r_sigma[self.last_r_visited].append(0)
             self.t_sigma_r[self.last_r_visited].append(0)
             self.going_back_to_r, self.going_to_sigma = False, True
@@ -727,11 +727,11 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 self.t_r_sigma[self.last_r_visited][-1] += self.cv_interval
-            if not hasattr(self.dyn.atoms, 'info'):
+            if not hasattr(self.dyn.atoms, "info"):
                 self.dyn.atoms.info = {}
-            self.dyn.atoms.info['from_which_r'] = self.last_r_visited
+            self.dyn.atoms.info["from_which_r"] = self.last_r_visited
             fname = f"{self.ini_cond_dir}/{self.n_ini_conds_already + n_cdt + 1}.extxyz"
-            write(fname, self.dyn.atoms, format='extxyz')
+            write(fname, self.dyn.atoms, format="extxyz")
             self.going_back_to_r, self.going_to_sigma = True, False
             self._write_checkpoint(f"{self.run_dir}/ini_checkpoint.txt")
 
@@ -767,8 +767,7 @@ class SingleWalkerSampler(MDDynamicSampler):
             n_traj = len([f for f in os.listdir(self.run_dir) if f.endswith(".traj")])
             self.trajfile = f"{self.run_dir}/md_traj_{n_traj}.traj"
 
-        traj = self.dyn.closelater(Trajectory(self.trajfile, "a", self.dyn.atoms,
-                                              properties=['energy', 'stress', 'forces']))
+        traj = self.dyn.closelater(Trajectory(self.trajfile, "a", self.dyn.atoms, properties=["energy", "stress", "forces"]))
         self.dyn.attach(traj.write, interval=self.cv_interval)
         barrier()
 
@@ -776,12 +775,11 @@ class SingleWalkerSampler(MDDynamicSampler):
             self.dyn.fix_com = True
             self.dyn.atoms.set_constraint(FixCom())
 
-        self.n_ini_conds_already = len(
-            [ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith("z")])
+        self.n_ini_conds_already = len([ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith("z")])
         if self.dyn.nsteps > 0:
-            self.dyn.atoms.calc.results['forces'] = forces
-            self.dyn.atoms.calc.results['stress'] = stress
-            self.dyn.atoms.calc.results['energy'] = energy
+            self.dyn.atoms.calc.results["forces"] = forces
+            self.dyn.atoms.calc.results["stress"] = stress
+            self.dyn.atoms.calc.results["energy"] = energy
             self.dyn._2nd_half_step(forces)
         else:
             self.dyn.call_observers()
@@ -797,8 +795,7 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.t_sigma_out = [[]]
         in_r = self.xi.in_r(self.dyn.atoms)
         if in_r:
-            self.last_r_visited = \
-            np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
+            self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
         out_of_r_zone = self.xi.is_out_of_r_zone(self.dyn.atoms)
         above_sigma = self.xi.above_sigma(self.dyn.atoms)
         if self.first_in_r:
@@ -808,11 +805,11 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.t_sigma_r[self.last_r_visited][-1] += 1
             if above_sigma and self.going_to_sigma:
                 self.going_to_sigma = False
-                if not hasattr(self.dyn.atoms, 'info'):
+                if not hasattr(self.dyn.atoms, "info"):
                     self.dyn.atoms.info = {}
-                self.dyn.atoms.info['from_which_r'] = self.last_r_visited
+                self.dyn.atoms.info["from_which_r"] = self.last_r_visited
                 fname = self.ini_cond_dir + str(self.n_ini_conds_already + 1) + ".extxyz"
-                write(fname, self.dyn.atoms, format='extxyz')
+                write(fname, self.dyn.atoms, format="extxyz")
                 self.going_back_to_r = True
             if in_r and self.going_back_to_r:
                 self.going_back_to_r = False
@@ -823,9 +820,9 @@ class SingleWalkerSampler(MDDynamicSampler):
                 list_atoms = read(self.trajfile, index=":")
                 at = list_atoms[self.rng.choice(len(list_atoms))]
                 self._set_initialcond_dyn(at)
-                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
-                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
-                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results["forces"] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results["stress"] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results["energy"] = np.zeros_like(energy)
                 self.first_in_r = False
                 self.going_to_sigma = True
                 self.going_back_to_r = False
@@ -841,9 +838,9 @@ class SingleWalkerSampler(MDDynamicSampler):
             else:
                 self.dyn._1st_half_step(forces)
                 self.dyn.nsteps += 1
-                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
-                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
-                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results["forces"] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results["stress"] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results["energy"] = np.zeros_like(energy)
                 self._write_checkpoint(checkpoint)
                 self._write_current_atoms()
                 self.dyn.observers.pop(-1)
@@ -857,9 +854,9 @@ class SingleWalkerSampler(MDDynamicSampler):
                 list_atoms = read(self.trajfile, index=":")
                 at = list_atoms[self.rng.choice(len(list_atoms))]
                 self._set_initialcond_dyn(at)
-                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
-                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
-                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results["forces"] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results["stress"] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results["energy"] = np.zeros_like(energy)
                 self.first_in_r = False
                 self.going_to_sigma = True
                 self.going_back_to_r = False
@@ -871,9 +868,9 @@ class SingleWalkerSampler(MDDynamicSampler):
             else:
                 self.dyn._1st_half_step(forces)
                 self.dyn.nsteps += 1
-                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
-                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
-                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results["forces"] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results["stress"] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results["energy"] = np.zeros_like(energy)
                 self._write_checkpoint(checkpoint)
                 self._write_current_atoms()
                 self.dyn.observers.pop(-1)
@@ -883,6 +880,7 @@ class SingleWalkerSampler(MDDynamicSampler):
 # =====================================================================
 #  Multi-walker (Fleming–Viot) sampler
 # =====================================================================
+
 
 class MultiWalkerSampler(MDDynamicSampler):
     """Fleming–Viot multi-replica initial condition sampler."""
@@ -900,10 +898,7 @@ class MultiWalkerSampler(MDDynamicSampler):
         n_traj_already = len([fi for fi in os.listdir(self.run_dir + str(self.w_i)) if fi.endswith(".traj")])
         if not append_traj:
             self.trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(n_traj_already)
-            traj = self.dyn.closelater(Trajectory(filename=self.trajfile,
-                                                  mode="a",
-                                                  atoms=self.dyn.atoms,
-                                                  properties=['energy', 'stress', 'forces']))
+            traj = self.dyn.closelater(Trajectory(filename=self.trajfile, mode="a", atoms=self.dyn.atoms, properties=["energy", "stress", "forces"]))
             self.dyn.attach(traj.write, interval=self.cv_interval)
 
     # --------------------------------------------------------------
@@ -924,7 +919,7 @@ class MultiWalkerSampler(MDDynamicSampler):
             "t_sigma_r": self.t_sigma_r,
             "t_r_sigma": self.t_r_sigma,
             "t_sigma_out": self.t_sigma_out,
-            "t_r_sigma_out": self.t_r_sigma_out
+            "t_r_sigma_out": self.t_r_sigma_out,
         }
         fname = f"{self.run_dir}{self.w_i}/ini_fv_{self.w_i}_checkpoint.txt"
         with paropen(fname, "w") as f:
@@ -962,8 +957,7 @@ class MultiWalkerSampler(MDDynamicSampler):
             del list_atoms
         branch_rep_number = self.rng.choice(np.setdiff1d(np.arange(self.n_walkers), self.w_i))
         while traj_idx is None:
-            n_traj_already = len(
-                [fi for fi in os.listdir(self.run_dir + str(branch_rep_number)) if fi.endswith(".traj")])
+            n_traj_already = len([fi for fi in os.listdir(self.run_dir + str(branch_rep_number)) if fi.endswith(".traj")])
             t = []
             for i in range(n_traj_already):
                 trajfile = self.run_dir + str(branch_rep_number) + "/md_traj_{}.traj".format(i)
@@ -977,25 +971,24 @@ class MultiWalkerSampler(MDDynamicSampler):
                     if t[-2] <= current_time < t[-1]:
                         traj_idx = i
             f = paropen(self.run_dir + str(self.w_i) + "/FV_history.txt", "a")
-            f.write("Attempt branching replica " + str(self.w_i) + " from replica index: " + str(
-                branch_rep_number) + " at time " + str(current_time) + " \n")
+            f.write("Attempt branching replica " + str(self.w_i) + " from replica index: " + str(branch_rep_number) + " at time " + str(current_time) + " \n")
             if traj_idx is not None:
                 f.write("Succesful branching\n \n")
                 f.close()
             else:
-                f.write("Cannot branch as replica " + str(branch_rep_number) + "  did not reach time " + str(
-                    current_time) + "\n")
+                f.write("Cannot branch as replica " + str(branch_rep_number) + "  did not reach time " + str(current_time) + "\n")
                 f.write("Going to sleep for 1 minute\n")
                 f.close()
                 time.sleep(60)
         trajfile = self.run_dir + str(branch_rep_number) + "/md_traj_{}.traj".format(traj_idx)
-        list_atoms = read(trajfile, index=":", format='traj')
+        list_atoms = read(trajfile, index=":", format="traj")
         if traj_idx == 0:
             atoms = list_atoms[current_time]
         else:
             atoms = list_atoms[current_time - t[traj_idx - 1]]
         self._set_initialcond_dyn(atoms)
         return atoms
+
     # --------------------------------------------------------------
 
     def sample(self, n_conditions=100, n_steps=None):
@@ -1015,7 +1008,8 @@ class MultiWalkerSampler(MDDynamicSampler):
         if self.ini_cond_dir is None:
             raise ValueError(
                 """The directory to store initial conditions is not defined ! 
-                Call initialconditionssampler.set_ini_cond_dir""")
+                Call initialconditionssampler.set_ini_cond_dir"""
+            )
         while not os.path.exists(self.ini_cond_dir):
             time.sleep(1)
         if n_steps is None:
@@ -1035,8 +1029,7 @@ class MultiWalkerSampler(MDDynamicSampler):
         if self.fixcm:
             self.dyn.atoms.set_constraint(FixCom())
             self.dyn.fix_com = True
-        n_ini_conds_already = len(
-            [fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")])
+        n_ini_conds_already = len([fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")])
         if isinstance(self.xi.cv_r, list):
             if self.t_r_sigma is None:
                 self.t_r_sigma = [[] for i in range(len(self.xi.cv_r))]
@@ -1058,8 +1051,7 @@ class MultiWalkerSampler(MDDynamicSampler):
             if self.xi.in_r(self.dyn.atoms):
                 self.first_in_r = True
         while n_cdt < n_conditions or n_stp < n_steps:
-            self.last_r_visited = \
-                np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
+            self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
             self.going_back_to_r = False
             self.going_to_sigma = True
             self.t_r_sigma[self.last_r_visited].append(0)
@@ -1068,12 +1060,11 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 self.t_r_sigma[self.last_r_visited][-1] += self.cv_interval
-            if not hasattr(self.dyn.atoms, 'info'):
+            if not hasattr(self.dyn.atoms, "info"):
                 self.dyn.atoms.info = {}
-            self.dyn.atoms.info['from_which_r'] = self.last_r_visited
-            fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(
-                n_ini_conds_already + n_cdt + 1) + ".extxyz"
-            write(fname, self.dyn.atoms, format='extxyz')
+            self.dyn.atoms.info["from_which_r"] = self.last_r_visited
+            fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + "_ini_cond_" + str(n_ini_conds_already + n_cdt + 1) + ".extxyz"
+            write(fname, self.dyn.atoms, format="extxyz")
             self.going_back_to_r = True
             self.going_to_sigma = False
             self._write_checkpoint()
@@ -1103,21 +1094,17 @@ class MultiWalkerSampler(MDDynamicSampler):
             self.dyn.nsteps = 0
             n_traj_already = len([fi for fi in os.listdir(self.run_dir + str(self.w_i)) if fi.endswith(".traj")])
             self.trajfile = self.run_dir + str(self.w_i) + "/md_traj_{}.traj".format(n_traj_already)
-        traj = self.dyn.closelater(Trajectory(filename=self.trajfile,
-                                              mode="a",
-                                              atoms=self.dyn.atoms,
-                                              properties=['energy', 'stress', 'forces']))
+        traj = self.dyn.closelater(Trajectory(filename=self.trajfile, mode="a", atoms=self.dyn.atoms, properties=["energy", "stress", "forces"]))
         self.dyn.attach(traj.write, interval=self.cv_interval)
         barrier()
         if self.fixcm:
             self.dyn.fix_com = True
             self.dyn.atoms.set_constraint(FixCom())
-        self.n_ini_conds_already = len(
-            [fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")])
+        self.n_ini_conds_already = len([fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")])
         if self.dyn.nsteps > 0:
-            self.dyn.atoms.calc.results['forces'] = forces
-            self.dyn.atoms.calc.results['stress'] = stress
-            self.dyn.atoms.calc.results['energy'] = energy
+            self.dyn.atoms.calc.results["forces"] = forces
+            self.dyn.atoms.calc.results["stress"] = stress
+            self.dyn.atoms.calc.results["energy"] = energy
             self.dyn._2nd_half_step(forces)
         else:
             self.dyn.call_observers()
@@ -1133,8 +1120,7 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.t_sigma_out = [[]]
         in_r = self.xi.in_r(self.dyn.atoms)
         if in_r:
-            self.last_r_visited = \
-                np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
+            self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
         out_of_r_zone = self.xi.is_out_of_r_zone(self.dyn.atoms)
         above_sigma = self.xi.above_sigma(self.dyn.atoms)
         if self.first_in_r:
@@ -1144,12 +1130,11 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.t_sigma_r[self.last_r_visited][-1] += 1
             if above_sigma and self.going_to_sigma:
                 self.going_to_sigma = False
-                if not hasattr(self.dyn.atoms, 'info'):
+                if not hasattr(self.dyn.atoms, "info"):
                     self.dyn.atoms.info = {}
-                self.dyn.atoms.info['from_which_r'] = self.last_r_visited
-                fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(
-                    self.n_ini_conds_already + 1) + ".extxyz"
-                write(fname, self.dyn.atoms, format='extxyz')
+                self.dyn.atoms.info["from_which_r"] = self.last_r_visited
+                fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + "_ini_cond_" + str(self.n_ini_conds_already + 1) + ".extxyz"
+                write(fname, self.dyn.atoms, format="extxyz")
                 self.going_back_to_r = True
             if in_r and self.going_back_to_r:
                 self.going_back_to_r = False
@@ -1174,9 +1159,9 @@ class MultiWalkerSampler(MDDynamicSampler):
             else:
                 self.dyn._1st_half_step(forces)
                 self.dyn.nsteps += 1
-                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
-                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
-                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results["forces"] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results["stress"] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results["energy"] = np.zeros_like(energy)
                 self._write_checkpoint()
                 self._write_current_atoms()
                 self.dyn.observers.pop(-1)
@@ -1200,9 +1185,9 @@ class MultiWalkerSampler(MDDynamicSampler):
             else:
                 self.dyn._1st_half_step(forces)
                 self.dyn.nsteps += 1
-                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
-                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
-                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results["forces"] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results["stress"] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results["energy"] = np.zeros_like(energy)
                 self._write_checkpoint()
                 self._write_current_atoms()
                 self.dyn.observers.pop(-1)
@@ -1212,6 +1197,7 @@ class MultiWalkerSampler(MDDynamicSampler):
 # =====================================================================
 #  File-based sampler
 # =====================================================================
+
 
 class FileBasedSampler(BaseInitialConditionSampler):
     """Sampler extracting initial conditions from existing trajectory files."""
@@ -1241,8 +1227,7 @@ class FileBasedSampler(BaseInitialConditionSampler):
             n_stp += self.cv_interval
 
         while n_stp < n_steps:
-            which_r = np.where(self.xi.in_which_r(traj[n_stp])
-                               == np.max(self.xi.in_which_r(traj[n_stp])))[0][0]
+            which_r = np.where(self.xi.in_which_r(traj[n_stp]) == np.max(self.xi.in_which_r(traj[n_stp])))[0][0]
             self.t_r_sigma[which_r].append(0)
             while not self.xi.above_sigma(traj[n_stp]) and n_stp < n_steps:
                 n_stp += self.cv_interval
@@ -1251,13 +1236,14 @@ class FileBasedSampler(BaseInitialConditionSampler):
                     break
                 self.t_r_sigma[which_r][-1] += self.cv_interval
 
-            if n_stp >= n_steps: break
+            if n_stp >= n_steps:
+                break
             fname = f"{self.ini_cond_dir}/{n_ini + n_cdt + 1}.extxyz"
             at = traj[n_stp].copy()
-            if not hasattr(at, 'info'):
+            if not hasattr(at, "info"):
                 at.info = {}
-            at.info['from_which_r'] = which_r
-            write(fname, at, format='extxyz')
+            at.info["from_which_r"] = which_r
+            write(fname, at, format="extxyz")
             self.t_sigma_r[which_r].append(0)
 
             while not self.xi.in_r(traj[n_stp]) and n_stp < n_steps:
@@ -1272,4 +1258,3 @@ class FileBasedSampler(BaseInitialConditionSampler):
                     self.t_r_sigma_out[self.which_r].append(t_r_sigma_out)
                 self.t_sigma_r[which_r][-1] += self.cv_interval
             n_cdt += 1
-

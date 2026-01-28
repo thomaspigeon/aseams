@@ -1,5 +1,5 @@
-import inspect
 import numpy as np
+
 
 class CollectiveVariables:
     """Class to gather collective variables used to sample initial conditions and run AMS"""
@@ -17,27 +17,27 @@ class CollectiveVariables:
         rc_grad: function that return the gradient of the reaction coordinate with respect to the positions of atoms
         """
 
-        if (isinstance(cv_r, list) and np.prod([inspect.isfunction(_) for _ in cv_r])) or inspect.isfunction(cv_r):
+        if (isinstance(cv_r, list) and np.prod([callable(_) for _ in cv_r])) or callable(cv_r):
             self.cv_r = cv_r
         else:
             raise ValueError("""cv_r must be either a function or a list of functions""")
-        if (isinstance(cv_p, list) and np.prod([inspect.isfunction(_) for _ in cv_p])) or inspect.isfunction(cv_p):
+        if (isinstance(cv_p, list) and np.prod([callable(_) for _ in cv_p])) or callable(cv_p):
             self.cv_p = cv_p
         else:
             raise ValueError("""cv_p must be either a function or a list of functions""")
-        if inspect.isfunction(reaction_coordinate):
+        if callable(reaction_coordinate):
             self.rc = reaction_coordinate
         else:
             raise ValueError("""reaction_coordinate must be a function""")
         if rc_grad is not None:
-            if inspect.isfunction(rc_grad):
+            if callable(rc_grad):
                 self.rc_grad = rc_grad
             else:
                 raise ValueError("""reaction_coordinate gradient must be a function""")
         else:
             self.rc_grad = None
         if cv_r_grad is not None:
-            if (isinstance(cv_r_grad, list) and np.prod([inspect.isfunction(_) for _ in cv_r_grad])) or inspect.isfunction(cv_r_grad):
+            if (isinstance(cv_r_grad, list) and np.prod([callable(_) for _ in cv_r_grad])) or callable(cv_r_grad):
                 self.cv_r_grad = cv_r_grad
             else:
                 raise ValueError("""cv_r gradient must be a function or a list of functions""")
@@ -57,7 +57,7 @@ class CollectiveVariables:
             If cv_r is a function, r_crit is a single string, if cv_r is a list, r_crit should be a list of strings
             matching the length of cv_r
         """
-        if inspect.isfunction(self.cv_r):
+        if callable(self.cv_r):
             if r_crit != "above" and r_crit != "between" and r_crit != "below":
                 raise ValueError("""When cv_r is a function, r_crit should either be "above", "between" or "below".""")
             else:
@@ -93,7 +93,7 @@ class CollectiveVariables:
             If cv_r is a list of functions, in_r_boundary must be a list of matching length. Each of its elements must
             be either a float or a list of two floats depending on the value of the corresponding element in r_crit
         """
-        if inspect.isfunction(self.cv_r):
+        if callable(self.cv_r):
             if self.r_crit == "above" or self.r_crit == "below":
                 if not isinstance(in_r_boundary, float):
                     raise ValueError(
@@ -128,7 +128,9 @@ class CollectiveVariables:
                         else:
                             self.in_r_boundary.append(in_r_boundary[i])
                     elif self.r_crit[i] == "between":
-                        if not (isinstance(in_r_boundary[i], list) and isinstance(in_r_boundary[i][0], float) and isinstance(in_r_boundary[i][1], float) and in_r_boundary[i][0] >= in_r_boundary[i][1]):
+                        if not (
+                            isinstance(in_r_boundary[i], list) and isinstance(in_r_boundary[i][0], float) and isinstance(in_r_boundary[i][1], float) and in_r_boundary[i][0] >= in_r_boundary[i][1]
+                        ):
                             raise ValueError(
                                 """When cv_r is a list of functions and r_crit[i] is "between",
                                                 in_r_boundary[i] must be list of two floats in increasing order"""
@@ -151,7 +153,7 @@ class CollectiveVariables:
             be either a float or a list of two floats depending on the value of the corresponding element in r_crit and
             consistent with the definition of in_r_boundary
         """
-        if inspect.isfunction(self.cv_r):
+        if callable(self.cv_r):
             if self.r_crit == "above":
                 if not (isinstance(sigma_r_level, float) and sigma_r_level <= self.in_r_boundary):
                     raise ValueError(
@@ -169,7 +171,13 @@ class CollectiveVariables:
                 else:
                     self.sigma_r_level = sigma_r_level
             elif self.r_crit == "between":
-                if not (isinstance(sigma_r_level, list) and isinstance(sigma_r_level[0], float) and isinstance(sigma_r_level[1], float) and sigma_r_level[0] <= self.in_r_boundary[0] and self.in_r_boundary[1] <= sigma_r_level[1]):
+                if not (
+                    isinstance(sigma_r_level, list)
+                    and isinstance(sigma_r_level[0], float)
+                    and isinstance(sigma_r_level[1], float)
+                    and sigma_r_level[0] <= self.in_r_boundary[0]
+                    and self.in_r_boundary[1] <= sigma_r_level[1]
+                ):
                     raise ValueError(
                         """When cv_r is a function and r_crit is "between", sigma_r_level must be a list of
                                         two floats in increasing order such that:
@@ -203,7 +211,13 @@ class CollectiveVariables:
                         else:
                             self.sigma_r_level.append(sigma_r_level[i])
                     elif self.r_crit[i] == "between":
-                        if not (isinstance(sigma_r_level[i], list) and isinstance(sigma_r_level[i][0], float) and isinstance(sigma_r_level[i][1], float) and sigma_r_level[i][0] <= self.in_r_boundary[i][0] and self.in_r_boundary[i][1] <= self.sigma_r_level[i][1]):
+                        if not (
+                            isinstance(sigma_r_level[i], list)
+                            and isinstance(sigma_r_level[i][0], float)
+                            and isinstance(sigma_r_level[i][1], float)
+                            and sigma_r_level[i][0] <= self.in_r_boundary[i][0]
+                            and self.in_r_boundary[i][1] <= self.sigma_r_level[i][1]
+                        ):
                             raise ValueError(
                                 """When cv_r is a list of functions and r_crit[i] is "between",
                                                 sigma_r_level must be a list of two floats in increasing order such that:
@@ -228,7 +242,7 @@ class CollectiveVariables:
             be either a float or a list of two floats depending on the value of the corresponding element in r_crit and
             consistent with the definition of sigma_r_level
         """
-        if inspect.isfunction(self.cv_r):
+        if callable(self.cv_r):
             if self.r_crit == "above":
                 if not (isinstance(out_of_r_zone, float) and out_of_r_zone <= self.sigma_r_level):
                     raise ValueError(
@@ -246,7 +260,13 @@ class CollectiveVariables:
                 else:
                     self.out_of_r_zone = out_of_r_zone
             elif self.r_crit == "between":
-                if not (isinstance(out_of_r_zone, list) and isinstance(out_of_r_zone[0], float) and isinstance(out_of_r_zone[1], float) and out_of_r_zone[0] <= self.sigma_r_level[0] and self.sigma_r_level[1] <= out_of_r_zone[1]):
+                if not (
+                    isinstance(out_of_r_zone, list)
+                    and isinstance(out_of_r_zone[0], float)
+                    and isinstance(out_of_r_zone[1], float)
+                    and out_of_r_zone[0] <= self.sigma_r_level[0]
+                    and self.sigma_r_level[1] <= out_of_r_zone[1]
+                ):
                     raise ValueError(
                         """When cv_r is a function and r_crit is "between", out_of_r_zone must be a list of
                                         two floats in increasing order such that:
@@ -280,7 +300,13 @@ class CollectiveVariables:
                         else:
                             self.out_of_r_zone.append(out_of_r_zone[i])
                     elif self.r_crit[i] == "between":
-                        if not (isinstance(out_of_r_zone[i], list) and isinstance(out_of_r_zone[i][0], float) and isinstance(out_of_r_zone[i][1], float) and out_of_r_zone[i][0] <= self.sigma_r_level[i][0] and self.sigma_r_level[i][1] <= out_of_r_zone[i][1]):
+                        if not (
+                            isinstance(out_of_r_zone[i], list)
+                            and isinstance(out_of_r_zone[i][0], float)
+                            and isinstance(out_of_r_zone[i][1], float)
+                            and out_of_r_zone[i][0] <= self.sigma_r_level[i][0]
+                            and self.sigma_r_level[i][1] <= out_of_r_zone[i][1]
+                        ):
                             raise ValueError(
                                 """When cv_r is a list of functions and r_crit[i] is "between",
                                                 sigma_r_level must be a list of two floats in increasing order such that:
@@ -401,7 +427,7 @@ class CollectiveVariables:
             If cv_p is a function, p_crit is a single string, if cv_p is a list, p_crit should be a list of strings
             matching the length of cv_p
         """
-        if inspect.isfunction(self.cv_p):
+        if callable(self.cv_p):
             if p_crit != "above" and p_crit != "between" and p_crit != "below":
                 raise ValueError("""When cv_p is a function, p_crit should either be "above", "between" or "below".""")
             else:
@@ -437,7 +463,7 @@ class CollectiveVariables:
             If cv_p is a list of functions, in_p_boundary must be a list of matching length. Each of its elements must
             be either a float or a list of two floats depending on the value of the corresponding element in p_crit
         """
-        if inspect.isfunction(self.cv_p):
+        if callable(self.cv_p):
             if self.p_crit == "above" or self.p_crit == "below":
                 if not isinstance(in_p_boundary, float):
                     raise ValueError(
@@ -532,7 +558,7 @@ class CollectiveVariables:
             A molecular structure for which at least the atomic positions are set for which the values of cv_r, cv_p and
             reaction coordinate can be computed
         """
-        if inspect.isfunction(self.cv_r):
+        if callable(self.cv_r):
             if not isinstance(self.cv_r(atoms), float):
                 raise ValueError(
                     """The function cv_r does not returns a float, cannot run AMS or initial conditions
@@ -549,7 +575,7 @@ class CollectiveVariables:
                                     sampler with this type of structures. If the structure atoms is the one desired, the CollectiveVariables
                                     object is not properly set and you should modify cv_r"""
                     )
-        if inspect.isfunction(self.cv_p):
+        if callable(self.cv_p):
             if not isinstance(self.cv_p(atoms), float):
                 raise ValueError(
                     """The function cv_p does not returns a float, cannot run AMS or initial conditions
@@ -575,7 +601,7 @@ class CollectiveVariables:
         if self.rc_grad is not None:
             if not self.rc_grad(atoms).shape == (len(atoms), 3):
                 raise ValueError(
-                """The function reaction_coordinate gradient does not returns a  tensor or a float of shape 
+                    """The function reaction_coordinate gradient does not returns a  tensor or a float of shape 
                 (len(atoms), 3)  cannot bias the initial conditions, the CollectiveVariables object is not properly set 
                 and you should modify rc_grad"""
                 )
