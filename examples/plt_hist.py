@@ -1,17 +1,12 @@
 import os
+import ase
 import numpy as np
 import matplotlib.pyplot as plt
 from ase.io import read
-import ase
 import ase.units as units
 from scipy.stats import rayleigh
 
-# --- CONFIGURATION ---
-# Chemin vers le dossier contenant vos .extxyz
-input_dir = "./ini_mc_rayleigh_400.0"
 
-temp_physique = 300.0       # Température du système
-# Importer votre CV (exemple distance pour N2)
 from src.aseams.cvs import CollectiveVariables
 
 def distance(atoms):
@@ -27,6 +22,7 @@ def dist_grad(atoms):
     return grad_r.squeeze()
 
 
+
 cv = CollectiveVariables(cv_r=distance,
                          cv_p=distance,
                          reaction_coordinate=distance,
@@ -39,62 +35,115 @@ cv.set_out_of_r_zone(1.5)
 cv.set_p_crit("above")
 cv.set_in_p_boundary(1.9)
 
-# --- CALCUL DE LA MASSE RÉDUITE ET SIGMA THÉORIQUE ---
-# Masse de l'azote en unités ASE
-m_N = 14.0067  # Environ 14.0067
-mu = (m_N * m_N) / (m_N + m_N)  # Masse réduite pour N2
+# --- CONFIGURATION ---
+# --- CONFIGURATION ---
+ref_dir = "./ini_mc_unbiased"
+biased_dir = "./ini_mc_flux_4.0"  # À adapter
+n_bins = 20
+temp_physique = 300.0
+ref_atoms = read(os.path.join(ref_dir, os.listdir(ref_dir)[0]))
+grad = cv.rc_grad(ref_atoms)  # Doit être de forme (N, 3)
+grad_c = grad.copy()
+for c in ref_atoms.constraints:
+    if hasattr(c, 'adjust_forces'):
+        c.adjust_forces(ref_atoms, grad_c)
+masses = ref_atoms.get_masses()
+G = np.sum(np.linalg.norm(grad_c, axis=1)**2 / masses)
 
 # sigma = sqrt(kT / mu)
-sigma_th = np.sqrt((temp_physique * units.kB) / mu)
-print("th", sigma_th)
-# --- RÉCUPÉRATION DES DONNÉES ---
-v_projections = []
-weights = []
-files = [f for f in os.listdir(input_dir) if f.endswith('.extxyz')]
+sigma_flux = np.sqrt(units.kB * temp_physique * G )
+norm_grad_c = np.sqrt(np.sum(grad_c**2))
+sigma_vn = sigma_flux / norm_grad_c
 
+v_flux_list_ref = []
+v_normal_list_ref = []
+weights_ref = []
+
+# --- LECTURE DES DONNÉES ---
+files = [f for f in os.listdir(ref_dir) if f.endswith('.extxyz')]
 print(f"Analyse de {len(files)} fichiers...")
-for fname in files:
-    atoms = read(os.path.join(input_dir, fname))
-    velocities = atoms.get_velocities()
-    grad_xi = cv.rc_grad(atoms)
 
-    # Projection vn = (v . grad) / |grad|
-    v_flat = velocities.flatten()
-    g_flat = grad_xi.flatten()
-    norm_g = np.linalg.norm(g_flat)
+for f in files:
+    atoms = read(os.path.join(ref_dir, f))
+    v = atoms.get_velocities()
+    #atoms.calc = calc
+    grad = cv.cv_r_grad[0](atoms).flatten()
+    norm_g = np.linalg.norm(grad)
+    v_flat = v.flatten()
 
-    if norm_g > 1e-10:
-        v_n = np.dot(v_flat, g_flat) / norm_g
-        v_projections.append(v_n)
-        weights.append(atoms.info["weight"])
+    # --- LES DEUX MESURES ---
+    # A. Le Flux : z_point = v . grad
+    z_dot = np.dot(v_flat, grad)
+
+    # B. La Vitesse Normale : vn = (v . grad) / ||grad||
+    v_n = z_dot / norm_g
+
+    v_flux_list_ref.append(z_dot)
+    v_normal_list_ref.append(v_n)
+    weights_ref.append(atoms.info.get("weight", 1.0))
+
+v_flux_list_bias = []
+v_normal_list_bias = []
+weights_bias = []
+
+# --- LECTURE DES DONNÉES ---
+files = [f for f in os.listdir(biased_dir) if f.endswith('.extxyz')]
+print(f"Analyse de {len(files)} fichiers...")
+
+for f in files:
+    atoms = read(os.path.join(biased_dir, f))
+    v = atoms.get_velocities()
+    #atoms.calc = calc
+    grad = cv.cv_r_grad[0](atoms).flatten()
+    norm_g = np.linalg.norm(grad)
+    v_flat = v.flatten()
+
+    # --- LES DEUX MESURES ---
+    # A. Le Flux : z_point = v . grad
+    z_dot = np.dot(v_flat, grad)
+
+    # B. La Vitesse Normale : vn = (v . grad) / ||grad||
+    v_n = z_dot / norm_g
+
+    v_flux_list_bias.append(z_dot)
+    v_normal_list_bias.append(v_n)
+    weights_bias.append(atoms.info.get("weight", 1.0))
+
+
 # --- VISUALISATION ---
-plt.figure(figsize=(10, 6))
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
-# Histogramme des données
-count, bins, _ = plt.hist(v_projections, bins=20, density=True,
-                          alpha=0.6, color='skyblue', edgecolor='black',
-                          label=f"Sampled (Projetée sur $e_R$)")
-count, bins, _ = plt.hist(v_projections, bins=20, density=True, weights=weights,
-                          alpha=0.6, color='green', edgecolor='black',
-                          label=f"Sampled reweighted (Projetée sur $e_R$)")
+x = np.linspace(0, max(max(v_flux_list_bias), max(v_flux_list_bias)), 200)
 
-# Courbe théorique de Rayleigh
-# La PDF de Rayleigh dans scipy est : f(x) = (x/s^2) * exp(-x^2 / (2s^2))
-x = np.linspace(0, max(bins), 200)
-pdf_rayleigh = rayleigh.pdf(x, scale=sigma_th)
-plt.plot(x, pdf_rayleigh, 'r-', lw=2.5, label=f"Rayleigh Théorique (T={temp_physique}K)")
+# --- PLOT 1 : LE FLUX (z_dot) ---
+ax1.hist(v_flux_list_ref, bins=n_bins, density=True, weights=weights_ref, alpha=0.3, color='green',
+         label="Flux échantillonné par MD")
+ax1.hist(v_flux_list_bias, bins=n_bins, density=True, weights=weights_bias, alpha=0.3, color='blue',
+         label="Flux IS reweighted")
+ax1.hist(v_flux_list_bias, bins=n_bins, density=True, weights=np.ones_like(weights_bias), alpha=0.5, color='red', label="Flux IS not reweighted")
+ax1.plot(x, rayleigh.pdf(x, scale=sigma_flux), 'r-', lw=2, label=f"Théorie Rayleigh ($\sigma=\sqrt{{kT/\mu}}$)")
+ax1.set_title("Distribution du FLUX (Variation de distance)")
+ax1.set_xlabel("$\dot{\zeta}$ (Å/fs)")
+ax1.legend()
 
-# Habillage
-plt.xlabel(r"Vitesse normale $v_n$ (Å/fs)", fontsize=12)
-plt.ylabel("Densité de probabilité", fontsize=12)
-plt.title(f"Vérification de l'équilibre du flux à travers la surface\n(Distribution des vitesses initiales)",
-          fontsize=14)
-plt.legend()
-plt.grid(axis='y', alpha=0.3)
+# --- PLOT 2 : LA VITESSE NORMALE (v_n) ---
+# Le sigma théorique de la vitesse projetée est réduit par la norme du gradient
+ax2.hist(v_normal_list_ref, bins=n_bins, density=True, weights=weights_ref, alpha=0.3, color='green',
+         label="Vitesse normale échantillonné par MD")
+ax2.hist(v_normal_list_bias, bins=n_bins, density=True, weights=weights_bias, alpha=0.3, color='blue', label="Vitesse normale IS reweighted($v_n$)")
+ax2.hist(v_normal_list_bias, bins=n_bins, density=True, weights=np.ones_like(weights_bias), alpha=0.3, color='red', label="Vitesse normale IS not weighted($v_n$)")
+ax2.plot(x, rayleigh.pdf(x, scale=sigma_vn), 'r-', lw=2,
+         label=f"Théorie Rayleigh ($\sigma_{{flux}} / \|\\nabla \zeta\|$)")
+ax2.set_title("Distribution de la VITESSE NORMALE")
+ax2.set_xlabel("$v_n$ (Å/fs)")
+ax2.legend()
 
-# Affichage des stats
-plt.text(0.6 * max(bins), 0.6 * max(pdf_rayleigh),
-         f"$\sigma_{{th}} = {sigma_th:.4f}$\n$\langle v_n \\rangle_{{data}} = {np.mean(v_projections):.4f}$\n$\langle v_n \\rangle_{{th}} = {sigma_th * np.sqrt(np.pi / 2):.4f}$",
-         bbox=dict(facecolor='white', alpha=0.8))
 
+plt.tight_layout()
 plt.show()
+
+print(f"Sigma Flux Théorique : {sigma_flux:.5f}")
+print(f"Sigma V_n Théorique : {sigma_vn:.5f}")
+print("Empirical mean MD", np.average(v_flux_list_ref, weights=weights_ref))
+print("Empirical mean IS", np.average(v_flux_list_bias, weights=weights_bias))
+print("Theoretical mean", sigma_flux * np.sqrt(np.pi / 2))

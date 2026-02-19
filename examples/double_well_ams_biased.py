@@ -1,9 +1,7 @@
 import numpy as np
 import os, datetime, ase, shutil
 from double_well_calculator import DoubleWell
-from ase.constraints import FixCom
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from ase.md import Langevin
 from ase.io import read, write
 import ase.units as units
 
@@ -12,30 +10,31 @@ from src.aseams.ams import AMS
 from src.aseams.cvs import CollectiveVariables
 from src.aseams.inicondssamplers import SingleWalkerSampler
 from ase.parallel import parprint, world, barrier
+from src.aseams.utils.langevinOBABO import LangevinOBABO
 
 # =====================================================================
 # 1. PARAMÈTRES DE LA SIMULATION
 # =====================================================================
 # Paramètres AMS
 n_ams = 10  # Nombre d'exécutions AMS par point
-n_rep = 25  # Nombre de répliques
+n_rep = 400  # Nombre de répliques
 n_samples = n_ams * n_rep  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
 temperature_K = 300.0
-timestep = 1. * units.fs
+timestep = 0.5 * units.fs
 friction = 0.01 / units.fs
 max_length_iter = 10000
 
 # Paramètres du Potentiel (Double Well)
-a_param = 0.1
+a_param = 0.2
 rc_param = 100.0
 d1_param = 1.0
 d2_param = 2.0
 
 # Paramètres de Biais
-alphas = [0.0, 0.5, 1.0]  # Pour Flux Biasing
-temp_biases = [300.0, 350.0, 400.0]  # Pour Rayleigh Biasing (en Kelvin)
+alphas = [0.0]  # Pour Flux Biasing
+temp_biases = [300.0]  # Pour Rayleigh Biasing (en Kelvin)
 
 # Random generators
 rng_ini, rng_dyn_ini, rng_bias = [np.random.default_rng(s) for s in [0, 0, 0]]
@@ -47,7 +46,6 @@ atoms = ase.Atoms("N2", positions=[[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]])
 calc = DoubleWell(a=a_param, rc=rc_param, d1=d1_param, d2=d2_param)
 atoms.calc = calc
 atoms.set_cell((8.0, 8.0, 8.0))
-atoms.set_constraint(FixCom())  # Fix the COM
 
 
 def distance(atoms):
@@ -78,7 +76,7 @@ cv.set_in_p_boundary(1.9)
 
 # --- Génération initiale "Raw" ---
 MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K, rng=rng_dyn_ini)
-dyn_ini = Langevin(atoms,
+dyn_ini = LangevinOBABO(atoms,
                    fixcm=True,
                    timestep=timestep,
                    temperature_K=temperature_K,
@@ -123,19 +121,21 @@ def run_ams_batch(method_name, param_val, input_dir):
     """Lance une série de calculs AMS pour un dossier de conditions donné"""
     parprint(f"\n>>> Mode: {method_name} (Param: {param_val})")
     p_list = []
-    rng_ams, rng_dyn_ams = [np.random.default_rng(s) for s in [0, 0]]
+    rng_ams, rng_dyn_ams = [np.random.default_rng(s) for s in [None, None]]
     for i in range(n_ams):
-        dyn_ams = Langevin(atoms,
+        dyn_ams = LangevinOBABO(atoms,
                            timestep=timestep,
                            temperature_K=temperature_K,
                            friction=friction,
+                           fixcm=True,
                            logfile=None,
                            rng=rng_dyn_ams)
         ams = AMS(n_rep=n_rep,
                   k_min=1,
                   dyn=dyn_ams,
                   xi=cv,
-                  rc_threshold=1e-6,
+                  fixcm=True,
+                  rc_threshold=1e-3,
                   verbose=False,
                   rng=rng_ams)
         ams.set_ini_cond_dir(input_dir)

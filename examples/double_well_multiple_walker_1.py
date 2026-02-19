@@ -3,12 +3,12 @@ from ase import Atoms
 from double_well_calculator import DoubleWell
 from ase.constraints import FixCom
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from ase.md import Langevin
+
 import ase.units as units
 
 from src.aseams import CollectiveVariables
 from src.aseams import MultiWalkerSampler
-
+from src.aseams.utils.langevinOBABO import LangevinOBABO
 # # Initial state.
 atoms = Atoms("N2", positions=[[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]])  # Start from contact pair COM at 0,0,0
 
@@ -24,7 +24,7 @@ rng_ini, rng_dyn_ini = [np.random.default_rng(s) for s in [1, 1]]
 # Setup dynamics
 MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K, rng=rng_dyn_ini)
 atoms.set_constraint(FixCom())  # Fix the COM
-dyn = Langevin(atoms,
+dyn = LangevinOBABO(atoms,
                fixcm=True,
                timestep=0.5 * units.fs,
                temperature_K=temperature_K,

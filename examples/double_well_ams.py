@@ -3,16 +3,14 @@ import ase, datetime
 from ase import Atoms
 from ase.io import read, write
 from double_well_calculator import DoubleWell
-from ase.constraints import FixCom
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from ase.md import Langevin
 import ase.units as units
 from ase.parallel import parprint, world, barrier
 
 from src.aseams import AMS
 from src.aseams import CollectiveVariables
 from src.aseams import SingleWalkerSampler
-from src.aseams.utils import LangevinHalfSteps
+from src.aseams.utils.langevinOBABO import LangevinOBABO
 
 
 # =====================================================================
@@ -46,7 +44,6 @@ atoms = Atoms("N2", positions=[[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]])  # Start from
 calc = DoubleWell(a=a_param, rc=rc_param)
 atoms.calc = calc
 atoms.set_cell((8.0, 8.0, 8.0))
-atoms.set_constraint(FixCom())  # Fix the COM
 
 def distance(atoms):
     return atoms.get_distance(0, 1, mic=True)
@@ -98,7 +95,7 @@ if world.rank == 0:
 # =====================================================================
 # --- Generate initial conditions "normal" ---
 MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K, rng=rng_dyn_ini)
-dyn_ini = Langevin(atoms,
+dyn_ini = LangevinOBABO(atoms,
                    fixcm=True,
                    timestep=timestep,
                    temperature_K=temperature_K,
@@ -133,7 +130,7 @@ seeds_dyn = rng_dyn_ams.choice(10**6, size=n_ams)
 for i in range(n_ams):
     rng_ams = np.random.default_rng(seeds_ams[i])
     rng_dyn_ams = np.random.default_rng(seeds_dyn[i])
-    dyn_ams = Langevin(atoms,
+    dyn_ams = LangevinOBABO(atoms,
                        timestep=timestep,
                        temperature_K=temperature_K,
                        friction=friction,
@@ -166,7 +163,6 @@ MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K, rng=rng_dyn_ini
 calc = DoubleWell(a=a_param, rc=rc_param)
 atoms.calc = calc
 atoms.set_cell((8.0, 8.0, 8.0))
-atoms.set_constraint(FixCom())  # Fix the COM
 # --- Generate initial conditions "steps by steps" ---
 parprint(f"Génération de {n_samples} conditions initiales brutes...")
 
@@ -174,8 +170,7 @@ stop = False
 write('current_atoms.xyz', atoms)
 while not stop:
     atoms = read('current_atoms.xyz')
-    atoms.set_constraint(FixCom())
-    dyn = LangevinHalfSteps(atoms,
+    dyn = LangevinOBABO(atoms,
                             fixcm=True,
                             timestep=1.0 * units.fs,
                             temperature_K=temperature_K,
@@ -209,8 +204,7 @@ for k in range(n_ams):
     rng_dyn_ams = np.random.default_rng(seeds_dyn[k])
     while not stop:
         atoms = read('current_atoms.xyz')
-        atoms.set_constraint(FixCom())
-        dyn_ams = LangevinHalfSteps(atoms,
+        dyn_ams = LangevinOBABO(atoms,
                                     fixcm=True,
                                     timestep=1.0 * units.fs,
                                     temperature_K=temperature_K,

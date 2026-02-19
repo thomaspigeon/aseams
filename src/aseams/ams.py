@@ -144,8 +144,11 @@ class AMS:
         """
         Set atomic position and momenta of a dynamic
         """
-        self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
-        self.dyn.atoms.set_momenta(atoms.get_momenta())
+        if self.fixcm:
+            self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(), apply_constraint=True)
+        else:
+            self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(), apply_constraint=False)
+        self.dyn.atoms.set_momenta(atoms.get_momenta(), apply_constraint=False)
         self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
         self.dyn.atoms.calc.results['stress'] = atoms.get_stress(apply_constraint=False)
         self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()

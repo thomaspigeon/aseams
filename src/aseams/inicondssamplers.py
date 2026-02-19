@@ -73,53 +73,44 @@ def _get_v_r_constants(u_R, sigma_R):
 
 
 def sample_biased_v_r(u_R, sigma_R, rng=None):
-    """
-    Sample the normal velocity component v_R by inverting the Cumulative Distribution Function (CDF)
-    using the scipy.optimize.newton root-finding algorithm.
-
-    Parameters:
-    -----------
-    u_R : float
-        The projection of the bias velocity shift onto the normal vector e_R.
-    sigma_R : float
-        The standard deviation of the thermal velocity along the normal.
-    rng : numpy.random.Generator, optional
-        Random number generator for reproducibility.
-
-    Returns:
-    --------
-    v_R : float
-        The sampled biased normal velocity (always positive).
-    """
     if rng is None:
         rng = np.random.default_rng()
 
-    # Draw a uniform random number in (0, 1)
+    # --- SÉCURITÉ 3 : Fallback (inchangé) ---
+    if u_R / sigma_R > 3.0:
+        return max(1e-12, rng.normal(u_R, sigma_R))
+
     U = rng.uniform(1e-10, 1.0 - 1e-10)
     p_0, z_star = _get_v_r_constants(u_R, sigma_R)
     target = p_0 + U * z_star
+    prefix = math.sqrt(2 * math.pi) * sigma_R * u_R
 
-    # Define the function G(r) = P(r) - Target, whose root we are seeking
     def G(r):
         diff = (r - u_R) / sigma_R
+        # Protection contre l'overflow de diff**2
+        if diff < -30: return -target
+        if diff > 30:  return prefix - target
+
         p_r = -(sigma_R ** 2) * math.exp(-0.5 * diff ** 2) + \
-              math.sqrt(2 * math.pi) * sigma_R * u_R * norm.cdf(diff)
+              prefix * norm.cdf(diff)
         return p_r - target
 
-    # Define the derivative G'(r), which is the biased flux density kernel
     def G_prime(r):
-        return r * math.exp(-0.5 * ((r - u_R) / sigma_R) ** 2)
+        diff = (r - u_R) / sigma_R
+        # Si on est trop loin, la dérivée est nulle
+        if abs(diff) > 30: return 0.0
+        return r * math.exp(-0.5 * diff ** 2)
 
-    # Initial guess: strictly positive value, typically the expected value or shift
     x0 = max(1e-3, u_R + sigma_R)
 
     try:
-        # Call SciPy's Newton routine (Quadratic convergence)
-        r_root = newton(func=G, x0=x0, fprime=G_prime, tol=1.48e-08, maxiter=50)
-    except RuntimeError:
-        # Fallback to brentq (slower but guaranteed convergence) if Newton fails
+        # On ignore localement les warnings numpy pour le solver
+        with np.errstate(all='ignore'):
+            r_root = newton(func=G, x0=x0, fprime=G_prime, tol=1.48e-08, maxiter=50)
+    except (RuntimeError, ZeroDivisionError):
+        # Si Newton échoue (ex: dérivée nulle), brentq est infaillible pour les fonctions monotones
         from scipy.optimize import brentq
-        r_root = brentq(G, 0, u_R + 10 * sigma_R)
+        r_root = brentq(G, 0, max(10.0, u_R + 10 * sigma_R))
 
     return max(1e-12, r_root)
 
@@ -224,70 +215,47 @@ class BaseInitialConditionSampler(ABC):
 
         # Select the outward normal direction
         if condition == 'below':
-            e_R = raw_grad_r
+            g_R = raw_grad_r
         elif condition == 'above':
-            e_R = -raw_grad_r
+            g_R = -raw_grad_r
         elif condition == 'between':
             v_min, v_max = val_threshold
-            e_R = raw_grad_r if abs(current_val - v_max) < abs(current_val - v_min) else -raw_grad_r
+            g_R = raw_grad_r if abs(current_val - v_max) < abs(current_val - v_min) else -raw_grad_r
         else:
-            e_R = raw_grad_r
+            g_R = raw_grad_r
 
-        #e_R /= np.linalg.norm(e_R)
-
-        """# --- 2. Physics Parameters ---
-        masses = atoms.get_masses()
-        m_3n = np.repeat(masses, 3)
-        m_eff_R = np.dot(e_R, m_3n * e_R)
-
-        # Sigmas for the Rayleigh distribution (normal component)
-        sigma_phys = math.sqrt(units.kB * temp_phys / m_eff_R)
-        sigma_bias = math.sqrt(units.kB * temp_bias / m_eff_R)
-        """
         # --- 2. Physics Parameters (CORRIGÉ) ---
         masses = atoms.get_masses()
         m_3n = np.repeat(masses, 3)
 
+        # PROJECTION : On assure que e_R respecte les contraintes (ex: FixCom)
+        """e_R_proj = e_R.copy().reshape((-1, 3))
+        for c in atoms.constraints:
+            if hasattr(c, 'adjust_forces'):
+                c.adjust_forces(atoms, e_R_proj)
+        e_R = e_R_proj.flatten()"""
+
         # Calcul correct de la variance projetée (Moyenne Harmonique)
-        # sigma^2 = kB * T * sum(e_i^2 / m_i)
-        inv_m_eff = np.sum((e_R ** 2) / m_3n)
+        inv_m_eff = np.sum((g_R ** 2) / m_3n)
 
         # Sigmas basés sur la masse effective correcte
         sigma_phys = math.sqrt(units.kB * temp_phys * inv_m_eff)
         sigma_bias = math.sqrt(units.kB * temp_bias * inv_m_eff)
 
-        e_R /= np.linalg.norm(e_R)
-
         # --- 3. Sampling ---
         # Normal component: Rayleigh at biased temperature
         v_R_sampled = sample_rayleigh(sigma_bias, rng=rng)
+        w_R = (g_R / m_3n) / inv_m_eff
 
         # Tangential components: standard Maxwell-Boltzmann at physical temperature
         v_thermal_3n = np.sqrt(units.kB * temp_phys / m_3n)
         v_full_MB = rng.normal(0, v_thermal_3n)
 
         # Remove any normal component from the thermal MB draw and add our biased v_R
-        v_perp = v_full_MB - np.dot(v_full_MB, e_R) * e_R
-        v_final_flat = v_R_sampled * e_R + v_perp
-
-        """# --- 4. Importance Sampling Weight ---
-        # Weight W = p_phys(v_R) / p_bias(v_R)
-        # W = (T_bias / T_phys) * exp[ -(m_eff*v_R^2 / 2k) * (1/T_phys - 1/T_bias) ]
-
-        temp_ratio = temp_bias / temp_phys
-        energy_factor = (m_eff_R * v_R_sampled ** 2) / (2.0 * units.kB)
-        diff_beta = (1.0 / temp_phys) - (1.0 / temp_bias)
-
-        weight = temp_ratio * math.exp(-energy_factor * diff_beta)
-        """
-        # --- 4. Importance Sampling Weight (CORRIGÉ avec inv_m_eff) ---
-        # Note: m_eff n'est plus utilisé directement, on utilise sigma ou inv_m_eff
-        # Energy factor = (1/2) * m_eff * v^2 = v^2 / (2 * inv_m_eff * kB) ?
-        # Non, Arg exp = - E * (beta_phys - beta_bias)
-        # E_cinetique_normale = 0.5 * M_eff * v^2 = 0.5 * (1/inv_m_eff) * v^2
+        v_perp = v_full_MB - np.dot(v_full_MB, g_R) * w_R
+        v_final_flat = v_R_sampled * w_R + v_perp
 
         m_eff_R = 1.0 / inv_m_eff  # Masse effective réelle
-
         temp_ratio = temp_bias / temp_phys
         energy_factor = (m_eff_R * v_R_sampled ** 2) / (2.0 * units.kB)
         diff_beta = (1.0 / temp_phys) - (1.0 / temp_bias)
@@ -295,7 +263,7 @@ class BaseInitialConditionSampler(ABC):
         weight = temp_ratio * math.exp(-energy_factor * diff_beta)
 
         # --- 5. Finalize Atoms object ---
-        atoms.set_velocities(v_final_flat.reshape((-1, 3)))
+        atoms.set_velocities(v_final_flat.reshape((-1, 3)), apply_constraint=True)
         if not hasattr(atoms, 'info'):
             atoms.info = {}
         atoms.info['weight'] = weight
@@ -377,92 +345,82 @@ class BaseInitialConditionSampler(ABC):
 
         if condition == 'below':
             # R = {q | zeta <= val}. Exiting means increasing zeta. e_R = +grad(zeta)
-            e_R = raw_grad_r
+            g_R = raw_grad_r
         elif condition == 'above':
             # R = {q | zeta >= val}. Exiting means decreasing zeta. e_R = -grad(zeta)
-            e_R = -raw_grad_r
+            g_R = -raw_grad_r
         elif condition == 'between':
             # R = {q | v_min <= zeta <= v_max}.
             # We check which boundary is closer to define the exit face
             v_min, v_max = val_threshold
             if abs(current_val - v_max) < abs(current_val - v_min):
-                e_R = raw_grad_r  # Exiting through the upper bound
+                g_R = raw_grad_r  # Exiting through the upper bound
             else:
-                e_R = -raw_grad_r  # Exiting through the lower bound
+                g_R = -raw_grad_r  # Exiting through the lower bound
         else:
-            e_R = raw_grad_r
-
-        # Normalize the outward normal e_R
-        #e_R /= np.linalg.norm(e_R)
-
+            g_R = raw_grad_r
         # Bias Direction (Reaction Coordinate)
-        grad_xi = self.xi.rc_grad(atoms).flatten()
-        #e_xi = grad_xi / np.linalg.norm(grad_xi)
-        e_xi = grad_xi
-        """"
-        # 2. Mass and Variance Parameters
-        m_xi = np.dot(e_xi, m_3n * e_xi)  # Effective mass in the bias direction
-        m_eff_R = np.dot(e_R, m_3n * e_R)  # Effective mass in the normal direction
-        sigma_R = 1.0 / math.sqrt(beta * m_eff_R)
-        """
+        g_xi = self.xi.rc_grad(atoms).flatten()
+
+        # On projette les deux directions pour respecter les contraintes
+        """for e in [e_R, e_xi]:
+            e_p = e.reshape((-1, 3))
+            for c in atoms.constraints:
+                if hasattr(c, 'adjust_forces'):
+                    c.adjust_forces(atoms, e_p)
+            # On écrase e par sa version projetée (flatten)
+            e = e_p.flatten()"""
+
         # 2. Mass and Variance Parameters (CORRIGÉ)
         # Calcul correct des masses effectives inverses
-        inv_m_eff_xi = np.sum((e_xi ** 2) / m_3n)
-        inv_m_eff_R = np.sum((e_R ** 2) / m_3n)
+        inv_m_eff_xi = max(np.sum((g_xi ** 2) / m_3n), 1e-14)
+        inv_m_eff_R = max(np.sum((g_R ** 2) / m_3n), 1e-14)
 
         # Sigmas corrects
-        # sigma = sqrt(kT / m_eff) = sqrt(kT * inv_m_eff) -> 1/sigma = 1/sqrt(...)
         sigma_R = math.sqrt(units.kB * temp * inv_m_eff_R)
         # Paramètres pour la direction de biais xi
         # v_thermal_xi est l'écart type de la vitesse thermique selon xi
         v_thermal_xi = math.sqrt(units.kB * temp * inv_m_eff_xi)
-        e_R /= np.linalg.norm(e_R)
-        e_xi /= np.linalg.norm(e_xi)
 
         # 3. Define the Bias Shift Vector u_alpha
-        u_alpha = alpha * v_thermal_xi * e_xi
-        u_R = np.dot(u_alpha, e_R)
+        u_direction = (g_xi / m_3n) / inv_m_eff_xi
+        u_alpha = (alpha * v_thermal_xi) * u_direction
+        u_R_raw = np.dot(u_alpha, g_R)
+        # --- SÉCURITÉ 2 : Clamping ---
+        # Théoriquement, u_R / sigma_R = alpha * cos(theta).
+        # On force ce ratio à rester dans les bornes [-alpha, alpha]
+        u_R = np.clip(u_R_raw, -alpha * sigma_R, alpha * sigma_R)
 
         # 4. Normal Velocity Sampling (v_R)
         v_R_sampled = sample_biased_v_r(u_R, sigma_R, rng=rng)
 
         # 5. Tangential Components Sampling (Shifted Gaussian)
         # Generate thermal noise shifted by u_alpha
+        w_R = (g_R / m_3n) / inv_m_eff_R
         v_thermal_3n = 1.0 / np.sqrt(beta * m_3n)
         v_full = u_alpha + rng.normal(0, v_thermal_3n)
 
         # Projection to ensure v_R_sampled is preserved on the normal axis
-        v_perp = v_full - np.dot(v_full, e_R) * e_R
-        v_final_flat = v_R_sampled * e_R + v_perp
+        v_perp = v_full - np.dot(v_full, g_R) * w_R
+        v_final_flat = v_R_sampled * w_R + v_perp
 
-        """# 6. Weight Calculation W(v)
-        p_0, z_star = _get_v_r_constants(u_R, sigma_R)
-        R_Z = z_star / (sigma_R ** 2)
-
-        # Mass-weighted projection for the exponential argument
-        v_dot_M_exi = np.dot(v_final_flat * m_3n, e_xi)
-        arg_exp = -alpha * math.sqrt(beta / m_xi) * v_dot_M_exi + (alpha ** 2 / 2.0)
-        weight = R_Z * math.exp(arg_exp)
-        """
         # 6. Weight Calculation W(v)
         p_0, z_star = _get_v_r_constants(u_R, sigma_R)
-
-        # Correction Z_star: Si alpha=0, on veut weight=1.0 relative au flux
-        # Le code précédent donnait weight=1.0 pour alpha=0. C'est correct.
         R_Z = z_star / (sigma_R ** 2)
-
-        # Mass-weighted projection (Attention ici)
-        # L'argument de l'exponentielle dépend de M_xi.
-        # arg = - alpha * (v_xi / v_thermal_xi) + ...
-        # v_xi = v . e_xi.
-
-        v_dot_xi = np.dot(v_final_flat, e_xi)
+        v_dot_xi = np.dot(v_final_flat, g_xi)
         arg_exp = -alpha * (v_dot_xi / v_thermal_xi) + (alpha ** 2 / 2.0)
 
-        weight = R_Z * math.exp(arg_exp)
+        log_weight = math.log(R_Z) + arg_exp
+
+        # On limite le poids pour éviter l'OverflowError final
+        if log_weight > 700:
+            weight = 1e308  # Valeur maximale représentable
+            print(f"Warning: Weight capped for alpha={alpha} (log_w={log_weight:.2f})")
+        else:
+            weight = math.exp(log_weight)
 
         # Update the Atoms object
-        atoms.set_velocities(v_final_flat.reshape((-1, 3)))
+        atoms.set_velocities(v_final_flat.reshape((-1, 3)), apply_constraint=True)
         if not hasattr(atoms, 'info'):
             atoms.info = {}
         atoms.info['weight'] = weight
@@ -602,8 +560,11 @@ class MDDynamicSampler(BaseInitialConditionSampler):
     # --------------------------------------------------------------
     def _set_initialcond_dyn(self, atoms):
         """Reset MD atoms to given state."""
-        self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions())
-        self.dyn.atoms.set_momenta(atoms.get_momenta())
+        if self.fixcm:
+            self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(apply_constraint=True))
+        else:
+            self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(apply_constraint=False))
+        self.dyn.atoms.set_momenta(atoms.get_momenta(apply_constraint=False))
         self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
         self.dyn.atoms.calc.results['stress'] = atoms.get_stress(apply_constraint=False)
         self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()
@@ -687,6 +648,7 @@ class SingleWalkerSampler(MDDynamicSampler):
         n_cdt, n_stp = 0, 0
         if self.fixcm:
             self.dyn.fix_com = True
+            self.dyn.atoms._constraints = []
             self.dyn.atoms.set_constraint(FixCom())
 
         self.n_ini_conds_already = len([f for f in os.listdir(self.ini_cond_dir) if f.endswith(".extxyz")])
@@ -722,14 +684,44 @@ class SingleWalkerSampler(MDDynamicSampler):
             self.t_r_sigma[self.last_r_visited].append(0)
             self.t_sigma_r[self.last_r_visited].append(0)
             self.going_back_to_r, self.going_to_sigma = False, True
-
-            while not self.xi.above_sigma(self.dyn.atoms):
+            valid_exit = False
+            while not (self.xi.above_sigma(self.dyn.atoms) and valid_exit):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 self.t_r_sigma[self.last_r_visited][-1] += self.cv_interval
+                ## Check whether the velocity is pointing out
+                if self.xi.cv_r_grad is not None:
+                    if self.xi.above_sigma(self.dyn.atoms):
+                        grad_r_func = self.xi.cv_r_grad[self.last_r_visited]
+                        g_R_raw = grad_r_func(self.dyn.atoms).flatten()
+                        if inspect.isfunction(self.xi.cv_r):
+                            condition = self.xi.r_crit
+                            val_threshold = self.xi.in_r_boundary
+                            current_val = self.xi.evaluate_cv_r(self.dyn.atoms)
+                        elif isinstance(self.xi.cv_r, list):
+                            condition = self.xi.r_crit[self.last_r_visited]
+                            val_threshold = self.xi.in_r_boundary[self.last_r_visited]
+                            current_val = self.xi.evaluate_cv_r(self.dyn.atoms)[self.last_r_visited]
+                        else:
+                            raise ValueError("""Problem of CollectiveVariables definition""")
+                        # Select the outward normal direction
+                        if condition == 'below':
+                            g_R = g_R_raw
+                        elif condition == 'above':
+                            g_R = -g_R_raw
+                        elif condition == 'between':
+                            v_min, v_max = val_threshold
+                            g_R = g_R_raw if abs(current_val - v_max) < abs(current_val - v_min) else -g_R_raw
+                        else:
+                            g_R = g_R_raw
+                        v_dot_n = np.dot(self.dyn.atoms.get_velocities().flatten(), g_R)
+                else:
+                    v_dot_n = 1
+                valid_exit = v_dot_n > 0
             if not hasattr(self.dyn.atoms, 'info'):
                 self.dyn.atoms.info = {}
             self.dyn.atoms.info['from_which_r'] = self.last_r_visited
+
             fname = f"{self.ini_cond_dir}/{self.n_ini_conds_already + n_cdt + 1}.extxyz"
             write(fname, self.dyn.atoms, format='extxyz')
             self.going_back_to_r, self.going_to_sigma = True, False
@@ -774,6 +766,7 @@ class SingleWalkerSampler(MDDynamicSampler):
 
         if self.fixcm:
             self.dyn.fix_com = True
+            self.dyn.atoms._constraints = []
             self.dyn.atoms.set_constraint(FixCom())
 
         self.n_ini_conds_already = len(
@@ -807,13 +800,40 @@ class SingleWalkerSampler(MDDynamicSampler):
             if self.going_back_to_r:
                 self.t_sigma_r[self.last_r_visited][-1] += 1
             if above_sigma and self.going_to_sigma:
-                self.going_to_sigma = False
-                if not hasattr(self.dyn.atoms, 'info'):
-                    self.dyn.atoms.info = {}
-                self.dyn.atoms.info['from_which_r'] = self.last_r_visited
-                fname = self.ini_cond_dir + str(self.n_ini_conds_already + 1) + ".extxyz"
-                write(fname, self.dyn.atoms, format='extxyz')
-                self.going_back_to_r = True
+                if self.xi.cv_r_grad is not None:
+                    grad_r_func = self.xi.cv_r_grad[self.last_r_visited]
+                    g_R_raw = grad_r_func(self.dyn.atoms).flatten()
+                    if inspect.isfunction(self.xi.cv_r):
+                        condition = self.xi.r_crit
+                        val_threshold = self.xi.in_r_boundary
+                        current_val = self.xi.evaluate_cv_r(self.dyn.atoms)
+                    elif isinstance(self.xi.cv_r, list):
+                        condition = self.xi.r_crit[self.last_r_visited]
+                        val_threshold = self.xi.in_r_boundary[self.last_r_visited]
+                        current_val = self.xi.evaluate_cv_r(self.dyn.atoms)[self.last_r_visited]
+                    else:
+                        raise ValueError("""Problem of CollectiveVariables definition""")
+                    # Select the outward normal direction
+                    if condition == 'below':
+                        g_R = g_R_raw
+                    elif condition == 'above':
+                        g_R = -g_R_raw
+                    elif condition == 'between':
+                        v_min, v_max = val_threshold
+                        g_R = g_R_raw if abs(current_val - v_max) < abs(current_val - v_min) else -g_R_raw
+                    else:
+                        g_R = g_R_raw
+                    v_dot_n = np.dot(self.dyn.atoms.get_velocities().flatten(), g_R)
+                else:
+                    v_dot_n = 1
+                if v_dot_n > 0:
+                    self.going_to_sigma = False
+                    if not hasattr(self.dyn.atoms, 'info'):
+                        self.dyn.atoms.info = {}
+                    self.dyn.atoms.info['from_which_r'] = self.last_r_visited
+                    fname = self.ini_cond_dir + str(self.n_ini_conds_already + 1) + ".extxyz"
+                    write(fname, self.dyn.atoms, format='extxyz')
+                    self.going_back_to_r = True
             if in_r and self.going_back_to_r:
                 self.going_back_to_r = False
                 self.t_r_sigma[self.last_r_visited].append(0)
@@ -1033,6 +1053,7 @@ class MultiWalkerSampler(MDDynamicSampler):
             )
         n_cdt, n_stp = 0, 0
         if self.fixcm:
+            self.dyn.atoms._constraints = []
             self.dyn.atoms.set_constraint(FixCom())
             self.dyn.fix_com = True
         n_ini_conds_already = len(
@@ -1064,10 +1085,40 @@ class MultiWalkerSampler(MDDynamicSampler):
             self.going_to_sigma = True
             self.t_r_sigma[self.last_r_visited].append(0)
             self.t_sigma_r[self.last_r_visited].append(0)
-            while not self.xi.above_sigma(self.dyn.atoms):
+            valid_exit = False
+            while not (self.xi.above_sigma(self.dyn.atoms) and valid_exit):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 self.t_r_sigma[self.last_r_visited][-1] += self.cv_interval
+                ## Check whether the velocity is pointing out
+                if self.xi.cv_r_grad is not None:
+                    if self.xi.above_sigma(self.dyn.atoms):
+                        grad_r_func = self.xi.cv_r_grad[self.last_r_visited]
+                        g_R_raw = grad_r_func(self.dyn.atoms).flatten()
+                        if inspect.isfunction(self.xi.cv_r):
+                            condition = self.xi.r_crit
+                            val_threshold = self.xi.in_r_boundary
+                            current_val = self.xi.evaluate_cv_r(self.dyn.atoms)
+                        elif isinstance(self.xi.cv_r, list):
+                            condition = self.xi.r_crit[self.last_r_visited]
+                            val_threshold = self.xi.in_r_boundary[self.last_r_visited]
+                            current_val = self.xi.evaluate_cv_r(self.dyn.atoms)[self.last_r_visited]
+                        else:
+                            raise ValueError("""Problem of CollectiveVariables definition""")
+                        # Select the outward normal direction
+                        if condition == 'below':
+                            g_R = g_R_raw
+                        elif condition == 'above':
+                            g_R = -g_R_raw
+                        elif condition == 'between':
+                            v_min, v_max = val_threshold
+                            g_R = g_R_raw if abs(current_val - v_max) < abs(current_val - v_min) else -g_R_raw
+                        else:
+                            g_R = g_R_raw
+                        v_dot_n = np.dot(self.dyn.atoms.get_velocities().flatten(), g_R)
+                else:
+                    v_dot_n = 1
+                valid_exit = v_dot_n > 0
             if not hasattr(self.dyn.atoms, 'info'):
                 self.dyn.atoms.info = {}
             self.dyn.atoms.info['from_which_r'] = self.last_r_visited
@@ -1111,6 +1162,7 @@ class MultiWalkerSampler(MDDynamicSampler):
         barrier()
         if self.fixcm:
             self.dyn.fix_com = True
+            self.dyn.atoms._constraints = []
             self.dyn.atoms.set_constraint(FixCom())
         self.n_ini_conds_already = len(
             [fi for fi in os.listdir(self.ini_cond_dir) if fi.startswith("walker_" + str(self.w_i) + "_")])
@@ -1143,14 +1195,41 @@ class MultiWalkerSampler(MDDynamicSampler):
             if self.going_back_to_r:
                 self.t_sigma_r[self.last_r_visited][-1] += 1
             if above_sigma and self.going_to_sigma:
-                self.going_to_sigma = False
-                if not hasattr(self.dyn.atoms, 'info'):
-                    self.dyn.atoms.info = {}
-                self.dyn.atoms.info['from_which_r'] = self.last_r_visited
-                fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(
-                    self.n_ini_conds_already + 1) + ".extxyz"
-                write(fname, self.dyn.atoms, format='extxyz')
-                self.going_back_to_r = True
+                if self.xi.cv_r_grad is not None:
+                    grad_r_func = self.xi.cv_r_grad[self.last_r_visited]
+                    g_R_raw = grad_r_func(self.dyn.atoms).flatten()
+                    if inspect.isfunction(self.xi.cv_r):
+                        condition = self.xi.r_crit
+                        val_threshold = self.xi.in_r_boundary
+                        current_val = self.xi.evaluate_cv_r(self.dyn.atoms)
+                    elif isinstance(self.xi.cv_r, list):
+                        condition = self.xi.r_crit[self.last_r_visited]
+                        val_threshold = self.xi.in_r_boundary[self.last_r_visited]
+                        current_val = self.xi.evaluate_cv_r(self.dyn.atoms)[self.last_r_visited]
+                    else:
+                        raise ValueError("""Problem of CollectiveVariables definition""")
+                    # Select the outward normal direction
+                    if condition == 'below':
+                        g_R = g_R_raw
+                    elif condition == 'above':
+                        g_R = -g_R_raw
+                    elif condition == 'between':
+                        v_min, v_max = val_threshold
+                        g_R = g_R_raw if abs(current_val - v_max) < abs(current_val - v_min) else -g_R_raw
+                    else:
+                        g_R = g_R_raw
+                    v_dot_n = np.dot(self.dyn.atoms.get_velocities().flatten(), g_R)
+                else:
+                    v_dot_n = 1
+                if v_dot_n > 0:
+                    self.going_to_sigma = False
+                    if not hasattr(self.dyn.atoms, 'info'):
+                        self.dyn.atoms.info = {}
+                    self.dyn.atoms.info['from_which_r'] = self.last_r_visited
+                    fname = self.ini_cond_dir + "/walker_" + str(self.w_i) + '_ini_cond_' + str(
+                        self.n_ini_conds_already + 1) + ".extxyz"
+                    write(fname, self.dyn.atoms, format='extxyz')
+                    self.going_back_to_r = True
             if in_r and self.going_back_to_r:
                 self.going_back_to_r = False
                 self.t_r_sigma[self.last_r_visited].append(0)
@@ -1244,13 +1323,42 @@ class FileBasedSampler(BaseInitialConditionSampler):
             which_r = np.where(self.xi.in_which_r(traj[n_stp])
                                == np.max(self.xi.in_which_r(traj[n_stp])))[0][0]
             self.t_r_sigma[which_r].append(0)
-            while not self.xi.above_sigma(traj[n_stp]) and n_stp < n_steps:
+            valid_exit = False
+            while not self.xi.above_sigma(traj[n_stp]) and n_stp < n_steps and not valid_exit:
                 n_stp += self.cv_interval
                 if n_stp >= n_steps:
                     self.t_r_sigma[which_r].pop()
                     break
                 self.t_r_sigma[which_r][-1] += self.cv_interval
-
+                ## Check whether the velocity is pointing out
+                if self.xi.cv_r_grad is not None:
+                    if self.xi.above_sigma(traj[n_stp]):
+                        grad_r_func = self.xi.cv_r_grad[which_r]
+                        g_R_raw = grad_r_func(traj[n_stp]).flatten()
+                        if inspect.isfunction(self.xi.cv_r):
+                            condition = self.xi.r_crit
+                            val_threshold = self.xi.in_r_boundary
+                            current_val = self.xi.evaluate_cv_r(traj[n_stp])
+                        elif isinstance(self.xi.cv_r, list):
+                            condition = self.xi.r_crit[which_r]
+                            val_threshold = self.xi.in_r_boundary[which_r]
+                            current_val = self.xi.evaluate_cv_r(traj[n_stp])[which_r]
+                        else:
+                            raise ValueError("""Problem of CollectiveVariables definition""")
+                        # Select the outward normal direction
+                        if condition == 'below':
+                            g_R = g_R_raw
+                        elif condition == 'above':
+                            g_R = -g_R_raw
+                        elif condition == 'between':
+                            v_min, v_max = val_threshold
+                            g_R = g_R_raw if abs(current_val - v_max) < abs(current_val - v_min) else -g_R_raw
+                        else:
+                            g_R = g_R_raw
+                        v_dot_n = np.dot(traj[n_stp].get_velocities().flatten(), g_R)
+                else:
+                    v_dot_n = 1
+                valid_exit = v_dot_n > 0
             if n_stp >= n_steps: break
             fname = f"{self.ini_cond_dir}/{n_ini + n_cdt + 1}.extxyz"
             at = traj[n_stp].copy()
@@ -1266,10 +1374,10 @@ class FileBasedSampler(BaseInitialConditionSampler):
                     self.t_sigma_r[which_r].pop()
                     break
                 if self.xi.is_out_of_r_zone(traj[n_stp]):
-                    t_sigma_out = self.t_sigma_r[self.which_r].pop(-1)
-                    t_r_sigma_out = self.t_r_sigma[self.which_r].pop(-1)
-                    self.t_sigma_out[self.which_r].append(t_sigma_out)
-                    self.t_r_sigma_out[self.which_r].append(t_r_sigma_out)
+                    t_sigma_out = self.t_sigma_r[which_r].pop(-1)
+                    t_r_sigma_out = self.t_r_sigma[which_r].pop(-1)
+                    self.t_sigma_out[which_r].append(t_sigma_out)
+                    self.t_r_sigma_out[which_r].append(t_r_sigma_out)
                 self.t_sigma_r[which_r][-1] += self.cv_interval
             n_cdt += 1
 

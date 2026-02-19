@@ -1,10 +1,8 @@
 import numpy as np
 import os, ase, datetime, math, shutil
-from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 import ase.units as units
 from ase.io import read, write
-from ase.constraints import FixCom
 from ase.parallel import parprint, world, barrier
 
 
@@ -12,6 +10,7 @@ from ase.parallel import parprint, world, barrier
 from double_well_calculator import DoubleWell
 from src.aseams.cvs import CollectiveVariables
 from src.aseams.inicondssamplers import SingleWalkerSampler
+from src.aseams.utils.langevinOBABO import LangevinOBABO
 
 
 def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, calc, max_steps=10000, rng_seed=0):
@@ -26,12 +25,11 @@ def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, calc, max_steps
     rng_dyn_mc = np.random.default_rng(seed=rng_seed)
     for fname in files:
         atoms = read(os.path.join(input_dir, fname))
-        atoms.set_constraint(FixCom())  # Fix the COM
         atoms.calc = calc
         weight = atoms.info.get('weight', 1.0)
 
         # Setup dynamics for this specific sample
-        dyn = Langevin(atoms,
+        dyn = LangevinOBABO(atoms,
                        fixcm=True,
                        timestep=timestep,
                        temperature_K=temp,
@@ -79,23 +77,23 @@ def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, calc, max_steps
 # 1. PARAMÈTRES DE LA SIMULATION
 # =====================================================================
 # Paramètres Monte Carlo
-n_samples = 500  # Pool de conditions initiales
+n_samples = 200  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
 temperature_K = 300.0
-timestep = 1. * units.fs
+timestep = 0.5 * units.fs
 friction = 0.01 / units.fs
 max_length_iter = 10000
 
 # Paramètres du Potentiel (Double Well)
-a_param = 0.1
+a_param = 0.2
 rc_param = 100.0
 d1_param = 1.0
 d2_param = 2.0
 
 # Paramètres de Biais
-alphas = [0.0, 0.5, 1.0]  # Pour Flux Biasing
-temp_biases = [300.0, 350.0, 400.0]  # Pour Rayleigh Biasing (en Kelvin)
+alphas = [0.0, 2.0, 4.0, 6.0]  # Pour Flux Biasing
+temp_biases = [300.0, 600.0, 900.0, 1200.0]  # Pour Rayleigh Biasing (en Kelvin)
 
 # Random generators
 rng_ini, rng_dyn_ini, rng_bias = [np.random.default_rng(s) for s in [0, 0, 0]]
@@ -107,7 +105,6 @@ atoms = ase.Atoms("N2", positions=[[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]])
 calc = DoubleWell(a=a_param, rc=rc_param, d1=d1_param, d2=d2_param)
 atoms.calc = calc
 atoms.set_cell((8.0, 8.0, 8.0))
-atoms.set_constraint(FixCom())  # Fix the COM
 
 
 def distance(atoms):
@@ -156,7 +153,7 @@ if world.rank == 0:
 
 # --- Génération initial "Raw" ---
 MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K, rng=rng_dyn_ini)
-dyn_ini = Langevin(atoms,
+dyn_ini = LangevinOBABO(atoms,
                    fixcm=True,
                    timestep=timestep,
                    temperature_K=temperature_K,
@@ -166,7 +163,7 @@ dyn_ini = Langevin(atoms,
 sampler = SingleWalkerSampler(dyn_ini,
                               cv,
                               cv_interval=1,
-                              fixcm=True,
+                              fixcm=False,
                               rng=rng_ini)
 
 sampler.set_run_dir("./ini_mc_raw")

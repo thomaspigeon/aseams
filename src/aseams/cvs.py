@@ -41,6 +41,8 @@ class CollectiveVariables:
                 self.cv_r_grad = cv_r_grad
             else:
                 raise ValueError("""cv_r gradient must be a function or a list of functions""")
+        else:
+            self.cv_r_grad = None
         self.r_crit = None
         self.p_crit = None
         self.in_r_boundary = None
