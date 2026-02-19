@@ -263,7 +263,7 @@ class BaseInitialConditionSampler(ABC):
         weight = temp_ratio * math.exp(-energy_factor * diff_beta)
 
         # --- 5. Finalize Atoms object ---
-        atoms.set_velocities(v_final_flat.reshape((-1, 3)), apply_constraint=True)
+        atoms.set_momenta(atoms.get_masses()[:, np.newaxis()] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
         if not hasattr(atoms, 'info'):
             atoms.info = {}
         atoms.info["weight"] = weight
@@ -407,7 +407,7 @@ class BaseInitialConditionSampler(ABC):
             weight = math.exp(log_weight)
 
         # Update the Atoms object
-        atoms.set_velocities(v_final_flat.reshape((-1, 3)), apply_constraint=True)
+        atoms.set_momenta(atoms.get_masses()[:, np.newaxis()] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
         if not hasattr(atoms, "info"):
             atoms.info = {}
         atoms.info["weight"] = weight
