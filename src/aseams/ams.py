@@ -26,18 +26,7 @@ class NumpyEncoder(json.JSONEncoder):
 class AMS:
     """Running AMS"""
 
-    def __init__(self, 
-                 n_rep, 
-                 k_min, 
-                 dyn, 
-                 xi,
-                 fixcm=True,
-                 cv_interval=1, 
-                 rc_threshold=0.0, 
-                 save_all=False, 
-                 max_length_iter=np.inf,
-                 verbose=False, 
-                 rng=None):
+    def __init__(self, n_rep, k_min, dyn, xi, fixcm=True, cv_interval=1, rc_threshold=0.0, save_all=False, max_length_iter=np.inf, verbose=False, rng=None):
         """
         Parameters:
 
@@ -150,15 +139,16 @@ class AMS:
         else:
             self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(), apply_constraint=False)
         self.dyn.atoms.set_momenta(atoms.get_momenta(), apply_constraint=False)
-        self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
-        self.dyn.atoms.calc.results['stress'] = atoms.get_stress(apply_constraint=False)
-        self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()
+        try:
+            self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
+            self.dyn.atoms.calc.results['stress'] = atoms.get_stress(apply_constraint=False)
+            self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()
+        except RuntimeError:  # If the values were not stored, they would be recalculated later
+            pass
+
 
     def _until_r_or_p(self, i, existing_steps=0):
-        traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj",
-                                              mode="a",
-                                              atoms=self.dyn.atoms,
-                                              properties=['energy', 'stress', 'forces']))
+        traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms, properties=["energy", "stress", "forces"]))
         self.dyn.attach(traj.write, interval=self.cv_interval)
         self.dyn.nsteps = existing_steps  # Force writing the first step if start of the trajectory
         z = self._rc()
@@ -207,7 +197,7 @@ class AMS:
         """function to chekc if the ini conds have a calculaor"""
         fnames = [ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith("z")]
         for name in fnames:
-            atoms = read(self.ini_cond_dir + "/" + name, format='extxyz', index=0)
+            atoms = read(self.ini_cond_dir + "/" + name, format="extxyz", index=0)
             if atoms.calc is None:
                 # parprint(name)
                 os.system("rm " + self.ini_cond_dir + "/" + name)
@@ -217,7 +207,7 @@ class AMS:
         fnames = [ini for ini in os.listdir(self.ini_cond_dir) if ini.endswith("z")]
         for name in fnames:
             if "_used" in name:
-                new_name = name.split(".")[0][:-5] + '.' + name.split(".")[1]
+                new_name = name.split(".")[0][:-5] + "." + name.split(".")[1]
                 os.rename(self.ini_cond_dir + "/" + name, self.ini_cond_dir + "/" + new_name)
 
     def _check_state_traj(self):
@@ -229,9 +219,13 @@ class AMS:
                 if not len(traj) == len(rc_traj):
                     raise ValueError("Replica " + str(i) + " has a problem, rc_traj and traj are not the same length !")
             else:
-                raise ValueError("""Replica """ + str(i) + """ has a problem as the trajectory is not a list. It might 
+                raise ValueError(
+                    """Replica """
+                    + str(i)
+                    + """ has a problem as the trajectory is not a list. It might 
                                     be a single configuration which should indicate that there is an issue in states 
-                                    definitions""")
+                                    definitions"""
+                )
 
     def _initialize(self):
         """Run the N_rep replicas from the initial condition until it enters either R or P"""
@@ -278,22 +272,22 @@ class AMS:
         branched_rep_z = np.loadtxt(self.ams_dir + "/rc_rep_" + str(j) + ".txt")
         branch_level = np.flatnonzero(branched_rep_z > z_kill)[0]  # First occurence of branched_rep_z above z_kill
 
-        # Update the z_max 
+        # Update the z_max
         self.z_maxs[i] = np.max(branched_rep_z[: branch_level + 1])
         # Save branched traj until current point included
         f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "w")
-        np.savetxt(f, branched_rep_z[: branch_level])
+        np.savetxt(f, branched_rep_z[:branch_level])
         f.close()
 
         read_traj = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
-        write(self.ams_dir + "/rep_" + str(i) + ".traj", read_traj[: branch_level], format='traj')
+        write(self.ams_dir + "/rep_" + str(i) + ".traj", read_traj[:branch_level], format="traj")
 
         self._set_initialcond_dyn(read_traj[branch_level])
         return branch_level + 1
 
     def _kill_reps(self):
         z_maxs_np = np.asarray(self.z_maxs)
-        self.z_kill.append(np.sort(z_maxs_np[z_maxs_np > -np.inf])[self.k_min - 1]) # Ensure to take z_kill above infinity
+        self.z_kill.append(np.sort(z_maxs_np[z_maxs_np > -np.inf])[self.k_min - 1])  # Ensure to take z_kill above infinity
         killed = np.flatnonzero(z_maxs_np - self.z_kill[-1] <= self.rc_threshold)
         self.killed.append(killed.tolist())
         alive = np.setdiff1d(np.arange(self.n_rep), killed)
@@ -313,8 +307,7 @@ class AMS:
         self._write_checkpoint()
         if len(self.remaining_killed) == self.n_rep:
             for i in range(self.n_rep):
-                self.rep_weights[i].append(
-                    self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+                self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
             self.current_p = np.sum([w[-1] for w in self.rep_weights])
             self.finished = True
             self.success = False
@@ -327,9 +320,9 @@ class AMS:
             else:
                 j = None
             j = broadcast(j)
-            #len_branch = self._branch_replica(i, j, self.z_kill[-1])
+            # len_branch = self._branch_replica(i, j, self.z_kill[-1])
             _ = self._branch_replica(i, j, self.z_kill[-1])
-            self._until_r_or_p(i, 0) #always write the branching position via the first step of the dyn.run
+            self._until_r_or_p(i, 0)  # always write the branching position via the first step of the dyn.run
             i = self.remaining_killed.pop(-1)
             self._write_checkpoint()
         # update probability and weights
@@ -396,19 +389,21 @@ class AMS:
 
     def _write_checkpoint(self):
         """Write information on the current state of AMS run to be able to restart"""
-        checkpoint_data = {"z_maxs": self.z_maxs,
-                           "rep_weights": self.rep_weights,
-                           "nsteps": self.dyn.nsteps,
-                           "killed": self.killed,
-                           "alive": self.alive,
-                           "z_kill": self.z_kill,
-                           "remaining_killed": self.remaining_killed,
-                           "iteration_number": self.ams_it,
-                           "initialized": self.initialized,
-                           "finished": self.finished,
-                           "success": self.success,
-                           "current_rep": self.current_rep,
-                           "current_p": self.current_p}
+        checkpoint_data = {
+            "z_maxs": self.z_maxs,
+            "rep_weights": self.rep_weights,
+            "nsteps": self.dyn.nsteps,
+            "killed": self.killed,
+            "alive": self.alive,
+            "z_kill": self.z_kill,
+            "remaining_killed": self.remaining_killed,
+            "iteration_number": self.ams_it,
+            "initialized": self.initialized,
+            "finished": self.finished,
+            "success": self.success,
+            "current_rep": self.current_rep,
+            "current_p": self.current_p,
+        }
         json_file = paropen(self.ams_dir + "/ams_checkpoint.txt", "w")
         json.dump(checkpoint_data, json_file, indent=4, cls=NumpyEncoder)
         json_file.close()
@@ -464,10 +459,7 @@ class AMS:
                 self.dyn.nsteps = 0
                 self._pick_ini_cond(rep_index=0)
         if not self.finished:
-            traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(self.current_rep) + ".traj",
-                                                  mode="a",
-                                                  atoms=self.dyn.atoms,
-                                                  properties=['energy', 'stress', 'forces']))
+            traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(self.current_rep) + ".traj", mode="a", atoms=self.dyn.atoms, properties=["energy", "stress", "forces"]))
             self.dyn.attach(traj.write, interval=self.cv_interval)
             z = self._rc()
             if z >= self.z_maxs[self.current_rep]:
@@ -476,9 +468,9 @@ class AMS:
             f.write(str(z) + "\n")
             f.close()
             if self.dyn.nsteps > 0:
-                self.dyn.atoms.calc.results['forces'] = forces
-                self.dyn.atoms.calc.results['stress'] = stress
-                self.dyn.atoms.calc.results['energy'] = energy
+                self.dyn.atoms.calc.results["forces"] = forces
+                self.dyn.atoms.calc.results["stress"] = stress
+                self.dyn.atoms.calc.results["energy"] = energy
                 self.dyn._2nd_half_step(forces)
             else:
                 self.dyn.call_observers()
@@ -487,9 +479,9 @@ class AMS:
             if z > -np.inf and z < np.inf and self.dyn.nsteps <= self.max_length_iter:
                 self.dyn._1st_half_step(forces)
                 self.dyn.nsteps += 1
-                self.dyn.atoms.calc.results['forces'] = np.zeros_like(forces)
-                self.dyn.atoms.calc.results['stress'] = np.zeros_like(stress)
-                self.dyn.atoms.calc.results['energy'] = np.zeros_like(energy)
+                self.dyn.atoms.calc.results["forces"] = np.zeros_like(forces)
+                self.dyn.atoms.calc.results["stress"] = np.zeros_like(stress)
+                self.dyn.atoms.calc.results["energy"] = np.zeros_like(energy)
                 self._write_current_atoms()
                 self._write_checkpoint()
                 return False
@@ -502,7 +494,7 @@ class AMS:
                         self.current_rep += 1
                         self._pick_ini_cond(rep_index=self.current_rep)
                     self.dyn.nsteps = 0
-                if self.initialized: ## not an else here, IMPORTANT
+                if self.initialized:  ## not an else here, IMPORTANT
                     if len(self.remaining_killed) == 0:
                         if np.min(self.z_maxs) >= np.inf:
                             self.finished = True
@@ -512,13 +504,11 @@ class AMS:
                         killed, self.alive = self._kill_reps()
                         self.ams_it += 1
                         for i in range(self.n_rep):
-                            self.rep_weights[i].append(
-                                self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+                            self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
                         self.current_p = np.sum([w[-1] for w in self.rep_weights])
                         if len(killed) == self.n_rep:
                             for i in range(self.n_rep):
-                                self.rep_weights[i].append(
-                                    self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
+                                self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
                             self.current_p = np.sum([w[-1] for w in self.rep_weights])
                             self.finished = True
                             self.success = False
