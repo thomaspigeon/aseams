@@ -129,15 +129,18 @@ class AMS:
         elif self.xi.in_p(self.dyn.atoms):
             z = np.inf
         return z
+        if not hasattr(atoms, 'info'):
+            atoms.info = {}
+        atoms.info["rc"] = z
 
     def _set_initialcond_dyn(self, atoms):
         """
         Set atomic position and momenta of a dynamic
         """
         if self.fixcm:
-            self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(), apply_constraint=True)
+            self.dyn.atoms.set_positions(atoms.get_positions(), apply_constraint=True)
         else:
-            self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(), apply_constraint=False)
+            self.dyn.atoms.set_positions(atoms.get_positions(), apply_constraint=False)
         self.dyn.atoms.set_momenta(atoms.get_momenta(), apply_constraint=False)
         try:
             self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
@@ -149,7 +152,7 @@ class AMS:
 
     def _until_r_or_p(self, i, existing_steps=0):
         traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms, properties=["energy", "stress", "forces"]))
-        self.dyn.attach(traj.write, interval=self.cv_interval)
+        #self.dyn.attach(traj.write, interval=self.cv_interval)
         self.dyn.nsteps = existing_steps  # Force writing the first step if start of the trajectory
         z = self._rc()
 
@@ -167,6 +170,7 @@ class AMS:
         while (z > -np.inf and z < np.inf) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
             self.dyn.run(self.cv_interval)
             z = self._rc()
+            traj.write()
             f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
             f.write(str(z) + "\n")
             f.close()
