@@ -201,5 +201,5 @@ class LangevinOBABO(MolecularDynamics):
         eta = self.rng.standard_normal(size=(len(self.atoms), 3))
         self.comm.broadcast(eta, 0)
         p = (1 / self.c1) * (self.c2 * p + self.c3 * eta)
-
         self.atoms.set_momenta(p, apply_constraint=False)
+        self.call_observers()
