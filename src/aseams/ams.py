@@ -6,6 +6,7 @@ from ase.io import Trajectory, read, write
 from ase.io.formats import UnknownFileTypeError
 from ase.parallel import parprint, paropen, world, barrier, broadcast
 from ase.constraints import FixCom
+from copy import copy
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -96,7 +97,7 @@ class AMS:
         self.alive = []
         self.current_rep = None
         self.current_p = None
-        self.rep_weights = [[] for i in range(n_rep)]
+        self.rep_weights = [None for i in range(n_rep)]
         self.z_kill = []
         self.killed = []
         # self.calc = dyn.atoms.calc  # We should not event need to have it here I think.
@@ -128,10 +129,10 @@ class AMS:
             z = -np.inf
         elif self.xi.in_p(self.dyn.atoms):
             z = np.inf
+        if not hasattr(self.dyn.atoms, 'info'):
+            self.dyn.atoms.info = {}
+        self.dyn.atoms.info["rc"] = z
         return z
-        if not hasattr(atoms, 'info'):
-            atoms.info = {}
-        atoms.info["rc"] = z
 
     def _set_initialcond_dyn(self, atoms):
         """
@@ -153,32 +154,24 @@ class AMS:
     def _until_r_or_p(self, i, existing_steps=0):
         self.dyn_observers = []
         traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms, properties=["energy", "stress", "forces"]))
-        self.dyn.attach(traj.write, interval=self.cv_interval)
-        self.dyn.nsteps = existing_steps  # Force writing the first step if start of the trajectory
+        self.dyn.nsteps = existing_steps  # Force writing the first step if start of the trajectory (existing_steps=0)
         z = self._rc()
 
         if existing_steps == 0:
-            f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
-            f.write(str(z) + "\n")
-            f.close()
             if z >= self.z_maxs[i]:
                 self.z_maxs[i] = z
             if not (z > -np.inf and z < np.inf) and world.rank == 0:
-                self.dyn.call_observers()
+                traj.write()
         if self.fixcm:
             self.dyn.atoms.set_constraint(FixCom())
             self.dyn.fix_com = True
         while (z > -np.inf and z < np.inf) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
             self.dyn.run(self.cv_interval)
             z = self._rc()
-            #traj.write()
-            f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
-            f.write(str(z) + "\n")
-            f.close()
+            traj.write()
             if z >= self.z_maxs[i]:
                 self.z_maxs[i] = z
 
-        self.dyn.observers.pop(-1)
         self.dyn.close()
         self.dyn.nsteps = 0
 
@@ -194,7 +187,7 @@ class AMS:
             filename, file_extension = os.path.splitext(ini_cond)
             os.rename(self.ini_cond_dir + "/" + ini_cond, self.ini_cond_dir + "/" + filename + "_used" + file_extension)
         # Initialize weight, either provided as a comment in the extxyz or set to default value
-        self.rep_weights[rep_index].append(atoms.info.get("weight", 1.0) / self.n_rep)
+        self.rep_weights[rep_index] = atoms.info.get("weight_ini_cond", 1.0) / self.n_rep
         self._set_initialcond_dyn(atoms)
         self._write_checkpoint()  # Save weight into checkpoint
 
@@ -219,7 +212,7 @@ class AMS:
         """function to check if the rep and rc_rep files are of same length"""
         for i in range(self.n_rep):
             traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
-            rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
+            rc_traj = np.array([atoms.info['rc'] for atoms in traj])
             if isinstance(traj, list):
                 if not len(traj) == len(rc_traj):
                     raise ValueError("Replica " + str(i) + " has a problem, rc_traj and traj are not the same length !")
@@ -256,38 +249,31 @@ class AMS:
             self._pick_ini_cond(rep_index=i)
             self._until_r_or_p(i, 0)
             self._write_checkpoint()
-        self.current_p = np.sum([w[-1] for w in self.rep_weights])
+        self.current_p = np.sum(self.rep_weights)
         self.initialized = True
         self._write_checkpoint()
 
     def _branch_replica(self, i, j, z_kill):
         """Branch replica i by copying replica j until z_kill and run the dynamics until it reaches either R or P"""
         if self.save_all and world.rank == 0:
-            os.system("cp " + self.ams_dir + "/rep_" + str(i) + ".traj " + self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj")
-            os.system("cp " + self.ams_dir + "/rc_rep_" + str(i) + ".txt " + self.ams_dir + "/nr_rc_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".txt")
-            json_file = paropen(self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + "_weights.txt", "w")
-            weights = {"weights": self.rep_weights[i]}
-            json.dump(weights, json_file, indent=4)
-            json_file.close()
-        self.rep_weights[i] = [self.rep_weights[j][-1]]  # self.rep_weights[j].copy()  # ou alors [self.rep_weights[j][-1]] ?
+            traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
+            for atoms in traj:
+                atoms.info['replica_weight'] = copy(self.rep_weights[i])
+            write(self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj", traj)
+        self.rep_weights[i] = copy(self.rep_weights[j])
         if world.rank == 0:
             os.remove(self.ams_dir + "/rep_" + str(i) + ".traj")
-            os.remove(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
         barrier()
-        branched_rep_z = np.loadtxt(self.ams_dir + "/rc_rep_" + str(j) + ".txt")
-        branch_level = np.flatnonzero(branched_rep_z > z_kill)[0]  # First occurence of branched_rep_z above z_kill
+        branched_rep = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
+        branched_rep_rc = np.array([atoms.info['rc'] for atoms in branched_rep])
+        branch_level = np.flatnonzero(branched_rep_rc > z_kill)[0]  # First occurence of branched_rep_z above z_kill
 
         # Update the z_max
-        self.z_maxs[i] = np.max(branched_rep_z[: branch_level + 1])
-        # Save branched traj until current point included
-        f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "w")
-        np.savetxt(f, branched_rep_z[:branch_level])
-        f.close()
+        self.z_maxs[i] = np.max(branched_rep_rc[: branch_level + 1])
+        # Save branched traj until branch_level - 1 (branch level is re-written by _until_r_or_p()
+        write(self.ams_dir + "/rep_" + str(i) + ".traj", branched_rep[:branch_level], format="traj")
 
-        read_traj = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
-        write(self.ams_dir + "/rep_" + str(i) + ".traj", read_traj[:branch_level], format="traj")
-
-        self._set_initialcond_dyn(read_traj[branch_level])
+        self._set_initialcond_dyn(branched_rep[branch_level])
         return branch_level + 1
 
     def _kill_reps(self):
@@ -304,6 +290,11 @@ class AMS:
         if np.min(self.z_maxs) >= np.inf:
             self.finished = True
             self.success = True
+            for i in range(self.n_rep):
+                traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
+                for atoms in traj:
+                    atoms.info['replica_weight'] = copy(self.rep_weights[i])
+                write(self.ams_dir + "/rep_" + str(i) + ".traj", traj)
             self._write_checkpoint()
             return False
         self.remaining_killed, self.alive = self._kill_reps()
@@ -312,8 +303,12 @@ class AMS:
         self._write_checkpoint()
         if len(self.remaining_killed) == self.n_rep:
             for i in range(self.n_rep):
-                self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-            self.current_p = np.sum([w[-1] for w in self.rep_weights])
+                self.rep_weights[i] *= (self.n_rep - len(self.killed[-1])) / self.n_rep
+                traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
+                for atoms in traj:
+                    atoms.info['replica_weight'] = copy(self.rep_weights[i])
+                write(self.ams_dir + "/rep_" + str(i) + ".traj", traj)
+            self.current_p = np.sum(self.rep_weights)
             self.finished = True
             self.success = False
             self._write_checkpoint()
@@ -325,15 +320,14 @@ class AMS:
             else:
                 j = None
             j = broadcast(j)
-            # len_branch = self._branch_replica(i, j, self.z_kill[-1])
             _ = self._branch_replica(i, j, self.z_kill[-1])
-            self._until_r_or_p(i, 0)  # always write the branching position via the first step of the dyn.run
+            self._until_r_or_p(i, existing_steps=0)  # always write the branching position via the first step of the dyn.run
             i = self.remaining_killed.pop(-1)
             self._write_checkpoint()
         # update probability and weights
         for i in range(self.n_rep):
-            self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-        self.current_p = np.sum([w[-1] for w in self.rep_weights])
+            self.rep_weights[i] *= (self.n_rep - len(self.killed[-1])) / self.n_rep
+        self.current_p = np.sum(self.rep_weights)
         return True
 
     def _finish_iteration(self):
@@ -341,9 +335,8 @@ class AMS:
         alive = self.alive
         while len(self.remaining_killed) > 0:
             i = self.remaining_killed[-1]
-            rc_traj = np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt")
-            if len(rc_traj.shape) == 0:
-                rc_traj = rc_traj.reshape([1])
+            traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
+            rc_traj = np.array([atoms.info['rc'] for atoms in traj])
             if np.max(rc_traj) <= z_kill and (rc_traj[-1] <= -np.inf or rc_traj[-1] >= np.inf):
                 if world.rank == 0:
                     j = self.rng.choice(alive)
@@ -352,25 +345,24 @@ class AMS:
                 j = broadcast(j)
                 _ = self._branch_replica(i, j, z_kill)
             elif np.max(rc_traj) > z_kill and not (rc_traj[-1] <= -np.inf or rc_traj[-1] >= np.inf):
-                read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
-                lentraj = len(read_traj)
-                self._set_initialcond_dyn(read_traj[-1])
-            self._until_r_or_p(i, lentraj)
-            self._write_checkpoint()
+                lentraj = len(traj)
+                self._set_initialcond_dyn(traj[-1])
+                self._until_r_or_p(i, lentraj)
             i = self.remaining_killed.pop(-1)
+            self._write_checkpoint()
         # update probability and weights
         for i in range(self.n_rep):
-            self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-        self.current_p = np.sum([w[-1] for w in self.rep_weights])
+            self.rep_weights[i] *= ((self.n_rep - len(self.killed[-1])) / self.n_rep)
+        self.current_p = np.sum(self.rep_weights)
 
     def p_ams(self):
         p = 0
         if not self.finished:
-            parprint("AMS not run")
+            parprint("AMS not finished")
             return 0.0
         for i in range(self.n_rep):
             if self.z_maxs[i] >= np.inf:  # If in B
-                p += self.rep_weights[i][-1]
+                p += self.rep_weights[i]
         return p
 
     def _read_checkpoint(self):
@@ -424,14 +416,11 @@ class AMS:
             self._read_checkpoint()
         barrier()  # Wait for all threads to read checkpoint
         if not self.initialized:
-            # self._check_the_conds()
-            # self.dyn.observers = []
             self._initialize()
             self._check_state_traj()
         if self.verbose:
             parprint("Initialisation done")
         if os.path.exists(self.ams_dir + "/ams_checkpoint.txt") and self.initialized and not self.finished and self.dyn.nsteps == 1:
-            # self.dyn.observers = []
             self._finish_iteration()
             self._check_state_traj()
         continue_running = max_iter != 0
@@ -470,16 +459,13 @@ class AMS:
             z = self._rc()
             if z >= self.z_maxs[self.current_rep]:
                 self.z_maxs[self.current_rep] = z
-            f = paropen(self.ams_dir + "/rc_rep_" + str(self.current_rep) + ".txt", "a")
-            f.write(str(z) + "\n")
-            f.close()
             if self.dyn.nsteps > 0:
                 self.dyn.atoms.calc.results["forces"] = forces
                 self.dyn.atoms.calc.results["stress"] = stress
                 self.dyn.atoms.calc.results["energy"] = energy
                 self.dyn._2nd_half_step(forces)
             else:
-                self.dyn.call_observers()
+                traj.write
                 forces = self.dyn.atoms.calc.results["forces"]
             self.dyn.observers.pop(-1)
             if z > -np.inf and z < np.inf and self.dyn.nsteps <= self.max_length_iter:
@@ -495,7 +481,7 @@ class AMS:
                 if not self.initialized:
                     if self.current_rep + 1 == self.n_rep:
                         self.initialized = True
-                        self.current_p = np.sum([w[-1] for w in self.rep_weights])
+                        self.current_p = np.sum(self.rep_weights)
                     else:
                         self.current_rep += 1
                         self._pick_ini_cond(rep_index=self.current_rep)
@@ -505,17 +491,25 @@ class AMS:
                         if np.min(self.z_maxs) >= np.inf:
                             self.finished = True
                             self.success = True
+                            for i in range(self.n_rep):
+                                traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
+                                for atoms in traj:
+                                    atoms.info['replica_weight'] = copy(self.rep_weights[i])
                             self._write_checkpoint()
                             return True
                         killed, self.alive = self._kill_reps()
                         self.ams_it += 1
                         for i in range(self.n_rep):
-                            self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-                        self.current_p = np.sum([w[-1] for w in self.rep_weights])
+                            self.rep_weights[i] *= (self.n_rep - len(self.killed[-1])) / self.n_rep
+                        self.current_p = np.sum(self.rep_weights)
                         if len(killed) == self.n_rep:
                             for i in range(self.n_rep):
-                                self.rep_weights[i].append(self.rep_weights[i][-1] * ((self.n_rep - len(self.killed[-1])) / self.n_rep))
-                            self.current_p = np.sum([w[-1] for w in self.rep_weights])
+                                self.rep_weights[i] *= (self.n_rep - len(self.killed[-1])) / self.n_rep
+                                traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
+                                for atoms in traj:
+                                    atoms.info['replica_weight'] = copy(self.rep_weights[i])
+                                write(self.ams_dir + "/rep_" + str(i) + ".traj", traj)
+                            self.current_p = np.sum(self.rep_weights)
                             self.finished = True
                             self.success = False
                             self._write_checkpoint()

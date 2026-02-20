@@ -266,7 +266,7 @@ class BaseInitialConditionSampler(ABC):
         atoms.set_momenta(atoms.get_masses()[:, np.newaxis] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
         if not hasattr(atoms, 'info'):
             atoms.info = {}
-        atoms.info["weight"] = weight
+        atoms.info["weight_ini_cond"] = weight
 
         return atoms
 
@@ -410,7 +410,7 @@ class BaseInitialConditionSampler(ABC):
         atoms.set_momenta(atoms.get_masses()[:, np.newaxis] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
         if not hasattr(atoms, "info"):
             atoms.info = {}
-        atoms.info["weight"] = weight
+        atoms.info["weight_ini_cond"] = weight
 
         return atoms
 
@@ -499,13 +499,13 @@ class BaseInitialConditionSampler(ABC):
             # Save to output directory
             write(out_path, biased_atoms, format="extxyz")
 
-            weights.append(biased_atoms.info.get("weight", np.nan))
+            weights.append(biased_atoms.info.get("weight_ini_cond", np.nan))
             output_files.append(out_path)
 
         summary = {
             "n_processed": len(output_files),
             "method_used": method,
-            "weights": weights,
+            "weight_ini_cond": weights,
             "output_files": output_files,
         }
 
