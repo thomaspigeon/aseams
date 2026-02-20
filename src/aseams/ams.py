@@ -151,8 +151,9 @@ class AMS:
 
 
     def _until_r_or_p(self, i, existing_steps=0):
+        self.dyn_observers = []
         traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(i) + ".traj", mode="a", atoms=self.dyn.atoms, properties=["energy", "stress", "forces"]))
-        #self.dyn.attach(traj.write, interval=self.cv_interval)
+        self.dyn.attach(traj.write, interval=self.cv_interval)
         self.dyn.nsteps = existing_steps  # Force writing the first step if start of the trajectory
         z = self._rc()
 
@@ -170,7 +171,7 @@ class AMS:
         while (z > -np.inf and z < np.inf) and self.dyn.nsteps <= self.max_length_iter:  # Cut trajectory of too long or reaching R or P
             self.dyn.run(self.cv_interval)
             z = self._rc()
-            traj.write()
+            #traj.write()
             f = paropen(self.ams_dir + "/rc_rep_" + str(i) + ".txt", "a")
             f.write(str(z) + "\n")
             f.close()
@@ -463,6 +464,7 @@ class AMS:
                 self.dyn.nsteps = 0
                 self._pick_ini_cond(rep_index=0)
         if not self.finished:
+            self.dyn_observers = []
             traj = self.dyn.closelater(Trajectory(filename=self.ams_dir + "/rep_" + str(self.current_rep) + ".traj", mode="a", atoms=self.dyn.atoms, properties=["energy", "stress", "forces"]))
             self.dyn.attach(traj.write, interval=self.cv_interval)
             z = self._rc()

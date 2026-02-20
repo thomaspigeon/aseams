@@ -263,7 +263,7 @@ class BaseInitialConditionSampler(ABC):
         weight = temp_ratio * math.exp(-energy_factor * diff_beta)
 
         # --- 5. Finalize Atoms object ---
-        atoms.set_momenta(atoms.get_masses()[:, np.newaxis()] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
+        atoms.set_momenta(atoms.get_masses()[:, np.newaxis] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
         if not hasattr(atoms, 'info'):
             atoms.info = {}
         atoms.info["weight"] = weight
@@ -407,7 +407,7 @@ class BaseInitialConditionSampler(ABC):
             weight = math.exp(log_weight)
 
         # Update the Atoms object
-        atoms.set_momenta(atoms.get_masses()[:, np.newaxis()] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
+        atoms.set_momenta(atoms.get_masses()[:, np.newaxis] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
         if not hasattr(atoms, "info"):
             atoms.info = {}
         atoms.info["weight"] = weight
@@ -545,10 +545,10 @@ class MDDynamicSampler(BaseInitialConditionSampler):
     def _set_initialcond_dyn(self, atoms):
         """Reset MD atoms to given state."""
         if self.fixcm:
-            self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(apply_constraint=True))
+            self.dyn.atoms.set_positions(atoms.get_positions(apply_constraint=True))
         else:
-            self.dyn.atoms.set_scaled_positions(atoms.get_scaled_positions(apply_constraint=False))
-        self.dyn.atoms.set_momenta(atoms.get_momenta(apply_constraint=False))
+            self.dyn.atoms.set_positions(atoms.get_positions(apply_constraint=False))
+        self.dyn.atoms.set_momenta(atoms.get_momenta(), apply_constraint=False)
         self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
         self.dyn.atoms.calc.results['stress'] = atoms.get_stress(apply_constraint=False)
         self.dyn.atoms.calc.results['energy'] = atoms.get_potential_energy()
@@ -699,6 +699,8 @@ class SingleWalkerSampler(MDDynamicSampler):
                         else:
                             g_R = g_R_raw
                         v_dot_n = np.dot(self.dyn.atoms.get_velocities().flatten(), g_R)
+                    else:
+                        v_dot_n = -1
                 else:
                     v_dot_n = 1
                 valid_exit = v_dot_n > 0
@@ -1091,6 +1093,8 @@ class MultiWalkerSampler(MDDynamicSampler):
                         else:
                             g_R = g_R_raw
                         v_dot_n = np.dot(self.dyn.atoms.get_velocities().flatten(), g_R)
+                    else:
+                        v_dot_n = -1
                 else:
                     v_dot_n = 1
                 valid_exit = v_dot_n > 0
