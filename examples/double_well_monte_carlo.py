@@ -26,7 +26,7 @@ def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, calc, max_steps
     for fname in files:
         atoms = read(os.path.join(input_dir, fname))
         atoms.calc = calc
-        weight = atoms.info.get('weight', 1.0)
+        weight = atoms.info.get('weight_ini_cond', 1.0)
 
         # Setup dynamics for this specific sample
         dyn = LangevinOBABO(atoms,
@@ -77,7 +77,7 @@ def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, calc, max_steps
 # 1. PARAMÈTRES DE LA SIMULATION
 # =====================================================================
 # Paramètres Monte Carlo
-n_samples = 200  # Pool de conditions initiales
+n_samples = 500  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
 temperature_K = 300.0
@@ -86,7 +86,7 @@ friction = 0.01 / units.fs
 max_length_iter = 10000
 
 # Paramètres du Potentiel (Double Well)
-a_param = 0.2
+a_param = 0.1
 rc_param = 100.0
 d1_param = 1.0
 d2_param = 2.0
@@ -183,7 +183,7 @@ if world.rank == 0:
     os.makedirs(unbiased_dir)
     for f in [fname for fname in os.listdir("./ini_mc_raw") if fname.endswith('.extxyz')]:
         at = read(os.path.join("./ini_mc_raw", f))
-        at.info['weight'] = 1.0
+        at.info['weight_ini_cond'] = 1.0
         write(os.path.join(unbiased_dir, f), at)
 barrier() # Attendre que le rang 0 finisse de copier
 

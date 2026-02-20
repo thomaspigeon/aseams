@@ -38,7 +38,7 @@ cv.set_in_p_boundary(1.9)
 # --- CONFIGURATION ---
 # --- CONFIGURATION ---
 ref_dir = "./ini_mc_unbiased"
-biased_dir = "./ini_mc_flux_4.0"  # À adapter
+biased_dir = "./ini_mc_flux_6.0"  # À adapter
 n_bins = 20
 temp_physique = 300.0
 ref_atoms = read(os.path.join(ref_dir, os.listdir(ref_dir)[0]))
@@ -80,7 +80,7 @@ for f in files:
 
     v_flux_list_ref.append(z_dot)
     v_normal_list_ref.append(v_n)
-    weights_ref.append(atoms.info.get("weight", 1.0))
+    weights_ref.append(atoms.info.get("weight_ini_cond", 1.0))
 
 v_flux_list_bias = []
 v_normal_list_bias = []
@@ -107,7 +107,7 @@ for f in files:
 
     v_flux_list_bias.append(z_dot)
     v_normal_list_bias.append(v_n)
-    weights_bias.append(atoms.info.get("weight", 1.0))
+    weights_bias.append(atoms.info.get("weight_ini_cond", 1.0))
 
 
 # --- VISUALISATION ---
@@ -120,7 +120,7 @@ ax1.hist(v_flux_list_ref, bins=n_bins, density=True, weights=weights_ref, alpha=
          label="Flux échantillonné par MD")
 ax1.hist(v_flux_list_bias, bins=n_bins, density=True, weights=weights_bias, alpha=0.3, color='blue',
          label="Flux IS reweighted")
-ax1.hist(v_flux_list_bias, bins=n_bins, density=True, weights=np.ones_like(weights_bias), alpha=0.5, color='red', label="Flux IS not reweighted")
+ax1.hist(v_flux_list_bias, bins=n_bins, density=True, weights=np.ones_like(weights_bias), alpha=0.3, color='red', label="Flux IS not reweighted")
 ax1.plot(x, rayleigh.pdf(x, scale=sigma_flux), 'r-', lw=2, label=f"Théorie Rayleigh ($\sigma=\sqrt{{kT/\mu}}$)")
 ax1.set_title("Distribution du FLUX (Variation de distance)")
 ax1.set_xlabel("$\dot{\zeta}$ (Å/fs)")

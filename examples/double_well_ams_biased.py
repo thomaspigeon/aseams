@@ -16,8 +16,8 @@ from src.aseams.utils.langevinOBABO import LangevinOBABO
 # 1. PARAMÈTRES DE LA SIMULATION
 # =====================================================================
 # Paramètres AMS
-n_ams = 10  # Nombre d'exécutions AMS par point
-n_rep = 400  # Nombre de répliques
+n_ams = 10  # Nombre d'exécutions AMS
+n_rep = 25  # Nombre de répliques
 n_samples = n_ams * n_rep  # Pool de conditions initiales
 
 # Paramètres de la Dynamique
@@ -27,7 +27,7 @@ friction = 0.01 / units.fs
 max_length_iter = 10000
 
 # Paramètres du Potentiel (Double Well)
-a_param = 0.2
+a_param = 0.1
 rc_param = 100.0
 d1_param = 1.0
 d2_param = 2.0
@@ -135,7 +135,7 @@ def run_ams_batch(method_name, param_val, input_dir):
                   dyn=dyn_ams,
                   xi=cv,
                   fixcm=True,
-                  rc_threshold=1e-3,
+                  rc_threshold=1e-2,
                   verbose=False,
                   rng=rng_ams)
         ams.set_ini_cond_dir(input_dir)
@@ -162,11 +162,11 @@ if world.rank == 0:
     os.makedirs(unbiased_dir)
     for f in [fname for fname in os.listdir("./ini_ams_raw") if fname.endswith('.extxyz')]:
         at = read(os.path.join("./ini_ams_raw", f))
-        at.info['weight'] = 1.0
+        at.info['weight_ini_cond'] = 1.0
         write(os.path.join(unbiased_dir, f), at)
 barrier() # Attendre que le rang 0 finisse de copier
 
-run_ams_batch("Unbiased_ams", "_", unbiased_dir)
+run_ams_batch("Unbiased", "_", unbiased_dir)
 
 # --- CAS 2 : FLUX BIASING ---
 for alpha in alphas:
@@ -178,7 +178,7 @@ for alpha in alphas:
                                     alpha=alpha,
                                     overwrite=True,
                                     rng=rng_bias)
-    run_ams_batch("Flux_ams", alpha, out_dir)
+    run_ams_batch("Flux", alpha, out_dir)
 
 # --- CAS 3 : RAYLEIGH BIASING ---
 for tb in temp_biases:
@@ -190,6 +190,6 @@ for tb in temp_biases:
                                     temp_bias=tb,
                                     overwrite=True,
                                     rng=rng_bias)
-    run_ams_batch("Rayleigh_ams", tb, out_dir)
+    run_ams_batch("Rayleigh", tb, out_dir)
 
 parprint(f"\nÉtude terminée. Voir {filename} pour les résultats.")

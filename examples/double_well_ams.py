@@ -1,5 +1,5 @@
 import numpy as np
-import ase, datetime
+import ase, datetime, os
 from ase import Atoms
 from ase.io import read, write
 from double_well_calculator import DoubleWell
@@ -17,7 +17,7 @@ from src.aseams.utils.langevinOBABO import LangevinOBABO
 # 1. PARAMÈTRES DE LA SIMULATION
 # =====================================================================
 # Paramètres AMS
-n_ams = 5  # Nombre d'exécutions AMS par point
+n_ams = 2  # Nombre d'exécutions AMS par point
 n_rep = 25  # Nombre de répliques
 n_samples = n_ams * n_rep  # Pool de conditions initiales
 
@@ -96,11 +96,11 @@ if world.rank == 0:
 # --- Generate initial conditions "normal" ---
 MaxwellBoltzmannDistribution(atoms, temperature_K=temperature_K, rng=rng_dyn_ini)
 dyn_ini = LangevinOBABO(atoms,
-                   fixcm=True,
-                   timestep=timestep,
-                   temperature_K=temperature_K,
-                   friction=friction,
-                   rng=rng_dyn_ini)
+                        fixcm=True,
+                        timestep=timestep,
+                        temperature_K=temperature_K,
+                        friction=friction,
+                        rng=rng_dyn_ini)
 sampler = SingleWalkerSampler(dyn_ini,
                               cv,
                               cv_interval=1,
@@ -131,11 +131,12 @@ for i in range(n_ams):
     rng_ams = np.random.default_rng(seeds_ams[i])
     rng_dyn_ams = np.random.default_rng(seeds_dyn[i])
     dyn_ams = LangevinOBABO(atoms,
-                       timestep=timestep,
-                       temperature_K=temperature_K,
-                       friction=friction,
-                       logfile=None,
-                       rng=rng_dyn_ams)
+                            fixcm=True,
+                            timestep=timestep,
+                            temperature_K=temperature_K,
+                            friction=friction,
+                            logfile=None,
+                            rng=rng_dyn_ams)
     ams = AMS(n_rep=n_rep,
               k_min=1,
               dyn=dyn_ams,
@@ -240,3 +241,4 @@ mean_p, std_p = np.mean(p_list), np.std(p_list, ddof=1)
 if world.rank == 0:
     with open(filename, "a") as f:
         f.write(f"{'AMS steps by steps':<20} | {mean_p:<15.5e} | {std_p / np.sqrt(n_ams):<15.5e} | {(std_p / np.sqrt(n_ams)) / mean_p:<15.5e}\n")
+    os.system('rm current_atoms.xyz')
