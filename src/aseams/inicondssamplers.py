@@ -21,7 +21,7 @@ from ase.io import Trajectory, read, write
 from ase.parallel import world, paropen, barrier
 from ase.constraints import FixCom
 
-from .ams import NumpyEncoder
+from src.aseams.ams import NumpyEncoder
 
 
 def sample_rayleigh(sigma, rng=None):
