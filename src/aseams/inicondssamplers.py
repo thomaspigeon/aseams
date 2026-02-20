@@ -222,9 +222,9 @@ class BaseInitialConditionSampler(ABC):
         # Select the outward normal direction
 
         if condition == "below":
-            e_R = raw_grad_r
+            g_R = raw_grad_r
         elif condition == "above":
-            e_R = -raw_grad_r
+            g_R = -raw_grad_r
         elif condition == "between":
             v_min, v_max = val_threshold
             g_R = raw_grad_r if abs(current_val - v_max) < abs(current_val - v_min) else -raw_grad_r
