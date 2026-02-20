@@ -208,23 +208,6 @@ class AMS:
                 new_name = name.split(".")[0][:-5] + "." + name.split(".")[1]
                 os.rename(self.ini_cond_dir + "/" + name, self.ini_cond_dir + "/" + new_name)
 
-    def _check_state_traj(self):
-        """function to check if the rep and rc_rep files are of same length"""
-        for i in range(self.n_rep):
-            traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
-            rc_traj = np.array([atoms.info['rc'] for atoms in traj])
-            if isinstance(traj, list):
-                if not len(traj) == len(rc_traj):
-                    raise ValueError("Replica " + str(i) + " has a problem, rc_traj and traj are not the same length !")
-            else:
-                raise ValueError(
-                    """Replica """
-                    + str(i)
-                    + """ has a problem as the trajectory is not a list. It might 
-                                    be a single configuration which should indicate that there is an issue in states 
-                                    definitions"""
-                )
-
     def _initialize(self):
         """Run the N_rep replicas from the initial condition until it enters either R or P"""
         if self.ini_cond_dir is None:
