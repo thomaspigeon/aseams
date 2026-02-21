@@ -160,7 +160,7 @@ class AMS:
         if existing_steps == 0:
             if z >= self.z_maxs[i]:
                 self.z_maxs[i] = z
-            if not (z > -np.inf and z < np.inf) and world.rank == 0:
+            if world.rank == 0:
                 traj.write()
         if self.fixcm:
             self.dyn.atoms.set_constraint(FixCom())
@@ -249,7 +249,12 @@ class AMS:
         barrier()
         branched_rep = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
         branched_rep_rc = np.array([atoms.info['rc'] for atoms in branched_rep])
-        branch_level = np.flatnonzero(branched_rep_rc > z_kill)[0]  # First occurence of branched_rep_z above z_kill
+        indices_above = np.flatnonzero(branched_rep_rc >= z_kill - self.rc_threshold)
+        if len(indices_above) == 0:
+            # Print an error, this should never occur
+            raise ValueError(f"There is no level above {z_kill - self.rc_threshold} in replica {j}, connot branch !git ")
+        else:
+            branch_level = indices_above[0]
 
         # Update the z_max
         self.z_maxs[i] = np.max(branched_rep_rc[: branch_level + 1])

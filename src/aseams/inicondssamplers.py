@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from ase.io import Trajectory, read, write
 from ase.parallel import world, paropen, barrier
 from ase.constraints import FixCom
+from scipy.special import erfcx, erfc
 
 from src.aseams.ams import NumpyEncoder
 
@@ -44,76 +45,81 @@ def sample_rayleigh(sigma, rng=None):
 
 def _get_v_r_constants(u_R, sigma_R):
     """
-    Calculate the P(0) and Z_star constants required for the CDF inversion.
-
-    Parameters:
-    -----------
-    u_R : float
-        The projection of the bias velocity shift (u_alpha) onto the normal vector e_R.
-    sigma_R : float
-        The standard deviation of the thermal velocity component along the normal e_R.
-
-    Returns:
-    --------
-    p_0 : float
-        The value of the primitive function P(t) at t=0.
-    z_star : float
-        The normalization constant (partition function) for the biased flux distribution.
+    Calcule p_0 et Z_star de manière robuste pour tout signe de u_R.
+    Z_star = int_0^inf r * exp(-(r-u_R)^2 / 2sigma^2) dr
     """
-    # Using scipy.stats.norm.cdf for the standard normal cumulative distribution function (Φ)
-    prefix = math.sqrt(2 * math.pi) * sigma_R * u_R
+    # Calcul de p_0 (valeur de la densité non normalisée en 0)
+    # Nécessaire pour l'algo de Newton
+    p_0 = math.exp(-u_R ** 2 / (2 * sigma_R ** 2))
 
-    # P(0) calculation
-    term1_0 = -(sigma_R**2) * math.exp(-(u_R**2) / (2 * sigma_R**2))
-    term2_0 = prefix * norm.cdf(-u_R / sigma_R)
-    p_0 = term1_0 + term2_0
+    # Calcul robuste de Z_star
+    # On utilise l'identité analytique :
+    # Z* = sigma^2 * exp(-u^2/2sigma^2) + u * sigma * sqrt(2pi) * Phi(u/sigma)
+    # Mais formulée avec erfcx pour éviter les overflows/underflows :
 
-    # Z_star = P(inf) - P(0) where P(inf) = prefix
-    z_star = prefix - p_0
+    x = -u_R / (math.sqrt(2) * sigma_R)
+    # erfcx(x) = exp(x^2) * erfc(x). C'est toujours > 0.
+
+    # Le terme intégral exact s'écrit :
+    # Z* = sigma^2 * exp(-u^2/2sigma^2) * [ 1 + u/sigma * sqrt(pi/2) * erfcx( -u / (sqrt(2)*sigma) ) ]
+
+    term_erfcx = (u_R / sigma_R) * math.sqrt(math.pi / 2) * erfcx(x)
+
+    # Facteur pré-exponentiel (attention p_0 contient déjà l'exp)
+    # Z_star = p_0 * sigma^2 * (1 + term_erfcx_scaled...)
+    # Plus simplement, on réutilise p_0 calculé au dessus :
+
+    z_star = (sigma_R ** 2) * p_0 * (1.0 + term_erfcx)
+
     return p_0, z_star
 
 
 def sample_biased_v_r(u_R, sigma_R, rng=None):
     if rng is None:
         rng = np.random.default_rng()
-
-    # --- SÉCURITÉ 3 : Fallback (inchangé) ---
-    if u_R / sigma_R > 3.0:
-        return max(1e-12, rng.normal(u_R, sigma_R))
-
     U = rng.uniform(1e-10, 1.0 - 1e-10)
+
+    # 1. Calcul des constantes de normalisation
     p_0, z_star = _get_v_r_constants(u_R, sigma_R)
-    target = p_0 + U * z_star
-    prefix = math.sqrt(2 * math.pi) * sigma_R * u_R
 
-    def G(r):
-        diff = (r - u_R) / sigma_R
-        # Protection contre l'overflow de diff**2
-        if diff < -30: return -target
-        if diff > 30:  return prefix - target
+    # 2. Définition de G(v) = CDF(v) - U
+    # On utilise l'identité : CDF(v) = 1 - (f(v) / f(0))
+    # où f(0) est proportionnel à z_star.
+    def G_func(v):
+        if v <= 0: return -U
 
-        p_r = -(sigma_R ** 2) * math.exp(-0.5 * diff ** 2) + prefix * norm.cdf(diff)
+        # y_v = (v - u_R) / (sqrt(2) * sigma_R)
+        # y_0 = -u_R / (sqrt(2) * sigma_R)
+        y_v = (v - u_R) / (1.4142135623730951 * sigma_R)
+        y_0 = -u_R / (1.4142135623730951 * sigma_R)
 
-        return p_r - target
+        # Calcul du ratio f(v)/f(0) de façon stable
+        # ratio = exp(y_0^2 - y_v^2) * [ (sigma + u*sqrt(pi/2)*erfcx(y_v)) / (sigma + u*sqrt(pi/2)*erfcx(y_0)) ]
+        arg_exp = (v * (2 * u_R - v)) / (2 * sigma_R ** 2)
+        num = sigma_R + u_R * 1.2533141373155001 * erfcx(y_v)
+        den = sigma_R + u_R * 1.2533141373155001 * erfcx(y_0)
 
-    def G_prime(r):
-        diff = (r - u_R) / sigma_R
-        # Si on est trop loin, la dérivée est nulle
-        if abs(diff) > 30: return 0.0
-        return r * math.exp(-0.5 * diff ** 2)
+        ratio = math.exp(arg_exp) * (num / den)
+        return (1.0 - ratio) - U
 
-    x0 = max(1e-3, u_R + sigma_R)
+    def G_prime(v):
+        # La dérivée est simplement la PDF : p(v) = (v/z_star) * exp(-(v-u_R)^2 / 2sigma^2)
+        arg_exp = -(v - u_R) ** 2 / (2 * sigma_R ** 2)
+        return (v / z_star) * math.exp(arg_exp)
+
+    # 3. Résolution robuste
+    # Estimation du mode de la distribution pour un bon x0
+    # Le mode de v*exp(-(v-u)^2/2s^2) est (u + sqrt(u^2 + 4s^2))/2
+    x0 = (u_R + math.sqrt(u_R ** 2 + 4 * sigma_R ** 2)) / 2.0
 
     try:
-        # On ignore localement les warnings numpy pour le solver
-        with np.errstate(all='ignore'):
-            r_root = newton(func=G, x0=x0, fprime=G_prime, tol=1.48e-08, maxiter=50)
-    except (RuntimeError, ZeroDivisionError):
-        # Si Newton échoue (ex: dérivée nulle), brentq est infaillible pour les fonctions monotones
+        return newton(func=G_func, x0=x0, fprime=G_prime, tol=1e-8, maxiter=50)
+    except RuntimeError:
+        # Fallback sur Brentq si Newton échoue (plus lent mais garanti si les signes diffèrent)
+        # On définit une borne supérieure sécurisée (10 sigmas après le centre)
+        upper_bound = max(10.0 * sigma_R, u_R + 10.0 * sigma_R)
         from scipy.optimize import brentq
-        r_root = brentq(G, 0, max(10.0, u_R + 10 * sigma_R))
-
-    return max(1e-12, r_root)
+        return brentq(G_func, 0, upper_bound)
 
 
 # =====================================================================
