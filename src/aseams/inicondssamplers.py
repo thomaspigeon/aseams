@@ -667,7 +667,7 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.dyn.call_observers()
             if self.xi.in_r(self.dyn.atoms):
                 self.first_in_r = True
-
+        self._write_checkpoint(f"{self.run_dir}/ini_checkpoint.txt")
         # Main loop
         while (n_cdt < n_conditions) or (n_stp < n_steps):
             self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
@@ -1062,6 +1062,7 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.first_in_r = False
             if self.xi.in_r(self.dyn.atoms):
                 self.first_in_r = True
+        self._write_checkpoint()
         while n_cdt < n_conditions or n_stp < n_steps:
             self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
             self.going_back_to_r = False
