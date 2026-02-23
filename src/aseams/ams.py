@@ -143,6 +143,8 @@ class AMS:
         else:
             self.dyn.atoms.set_positions(atoms.get_positions(), apply_constraint=False)
         self.dyn.atoms.set_momenta(atoms.get_momenta(), apply_constraint=False)
+        self.dyn.atoms.info.clear()
+        self.dyn.atoms.info.update(atoms.info)
         try:
             self.dyn.atoms.calc.results['forces'] = atoms.get_forces(apply_constraint=False)
             self.dyn.atoms.calc.results['stress'] = atoms.get_stress(apply_constraint=False)
