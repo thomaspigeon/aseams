@@ -246,7 +246,7 @@ class BaseInitialConditionSampler(ABC):
 
         # Vecteurs unitaires (e_R_config = e_R, M_e_R = M * e_R)
         e_R_config = (g_R / m_3n) / norm_g_R  # Dimension [1/sqrt(masse)]
-        M_e_R = g_R / norm_g_R  # Dimension [sqrt(masse)]
+        eta_R = g_R / norm_g_R  # Dimension [sqrt(masse)]
 
         # Sigma thermique pour le moment : sigma_p = sqrt(k_B * T)
         # Note : p_n^2 / (2 * sigma_p^2) est adimensionnel
@@ -261,10 +261,10 @@ class BaseInitialConditionSampler(ABC):
 
         # Projection pour obtenir p_perp (orthogonal à e_R au sens de M^-1)
         # p_perp = p_th - (p_th^T e_R) * M_e_R
-        p_perp = p_th - np.dot(p_th, e_R_config) * M_e_R
+        p_perp = p_th - np.dot(p_th, e_R_config) * eta_R
 
         # Synthèse du moment total : p = p_n * M_e_R + p_perp
-        p_final = p_n_sampled * M_e_R + p_perp
+        p_final = p_n_sampled * eta_R + p_perp
 
         # --- 4. Calcul du poids (Section 3.2 LaTeX) ---
         temp_ratio = temp_bias / temp_phys
@@ -380,11 +380,11 @@ class BaseInitialConditionSampler(ABC):
         # Vecteurs unitaires et duals
         e_R_config = (g_R / m_3n) / norm_g_R
         e_xi_config = (g_xi / m_3n) / norm_g_xi
-        M_e_R = g_R / norm_g_R
-        M_e_xi = g_xi / norm_g_xi
+        eta_R = g_R / norm_g_R
+        eta_xi = g_xi / norm_g_xi
 
         # Corrélation géométrique (rho)
-        rho_R_xi = np.dot(e_xi_config, M_e_R)
+        rho_R_xi = np.dot(e_xi_config, eta_R)
 
         # --- 3. SÉCURITÉ 1 : Clipping du Décalage ---
         # On calcule le décalage théorique u_p_R
@@ -397,13 +397,13 @@ class BaseInitialConditionSampler(ABC):
         p_n_sampled = sample_biased_p_r(u_p_R, sigma_p_R, rng=rng)
 
         # Bruit thermique translaté par le boost alpha selon la coordonnée de réaction
-        delta_p = (alpha * sigma_p_R) * M_e_xi
+        delta_p = (alpha * sigma_p_R) * eta_xi
         p_th = rng.normal(0, sigma_p_R * np.sqrt(m_3n))
         p_full = delta_p + p_th
 
         # Retrait de la composante normale pour injecter p_n_sampled
-        p_perp = p_full - np.dot(p_full, e_R_config) * M_e_R
-        p_final = p_n_sampled * M_e_R + p_perp
+        p_perp = p_full - np.dot(p_full, e_R_config) * eta_R
+        p_final = p_n_sampled * eta_R + p_perp
 
         # --- 5. SÉCURITÉ 2 : Calcul du Poids via Logarithme ---
         p_0, z_star = _get_p_r_constants(u_p_R, sigma_p_R)
