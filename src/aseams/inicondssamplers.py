@@ -27,26 +27,21 @@ from src.aseams.ams import NumpyEncoder
 
 def sample_rayleigh(sigma, rng=None):
     """
-    Sample from a Rayleigh distribution: p(v) = (v/sigma^2) * exp(-v^2 / (2*sigma^2))
+    Échantillonne une loi de Rayleigh : f(p_n) = (p_n/sigma^2) * exp(-p_n^2 / (2*sigma^2))
 
-    Parameters:
-    -----------
-    sigma : float
-        The scale parameter of the Rayleigh distribution (sqrt(kT/m)).
-    rng : numpy.random.Generator, optional
-        Random number generator.
+    Dans le cadre des moments avec métrique de masse, sigma vaut sqrt(k_B T).
     """
     if rng is None:
         rng = np.random.default_rng()
-    # Inverse CDF method for Rayleigh: v = sigma * sqrt(-2 * ln(1 - U))
     u = rng.uniform(1e-10, 1.0 - 1e-10)
     return sigma * math.sqrt(-2.0 * math.log(1.0 - u))
 
 
-def _get_v_r_constants(u_R, sigma_R):
+def _get_p_r_constants(u_R, sigma_R):
     """
-    Calcule p_0 et Z_star de manière robuste pour tout signe de u_R.
-    Z_star = int_0^inf r * exp(-(r-u_R)^2 / 2sigma^2) dr
+    Calcule p_0 et Z_star de manière robuste pour le moment normal décalé.
+    u_n : décalage (alpha * sigma_n * rho)
+    sigma_n : sqrt(k_B T)
     """
     # Calcul de p_0 (valeur de la densité non normalisée en 0)
     # Nécessaire pour l'algo de Newton
@@ -74,13 +69,16 @@ def _get_v_r_constants(u_R, sigma_R):
     return p_0, z_star
 
 
-def sample_biased_v_r(u_R, sigma_R, rng=None):
+def sample_biased_p_r(u_R, sigma_R, rng=None):
+    """
+    Échantillonne le moment normal p_n selon une Rayleigh décalée.
+    """
     if rng is None:
         rng = np.random.default_rng()
     U = rng.uniform(1e-10, 1.0 - 1e-10)
 
     # 1. Calcul des constantes de normalisation
-    p_0, z_star = _get_v_r_constants(u_R, sigma_R)
+    p_0, z_star = _get_p_r_constants(u_R, sigma_R)
 
     # 2. Définition de G(v) = CDF(v) - U
     # On utilise l'identité : CDF(v) = 1 - (f(v) / f(0))
@@ -237,39 +235,47 @@ class BaseInitialConditionSampler(ABC):
         else:
             g_R = raw_grad_r
 
-        # --- 2. Physics Parameters (CORRIGÉ) ---
+        # --- 2. Paramètres Géométriques et Physiques ---
         masses = atoms.get_masses()
         m_3n = np.repeat(masses, 3)
 
-        # Calcul correct de la variance projetée (Moyenne Harmonique)
+        # Calcul de la norme du gradient dans la métrique de masse inverse
+        # norm_g_R = sqrt( grad^T M^-1 grad )
         inv_m_eff = np.sum((g_R ** 2) / m_3n)
+        norm_g_R = math.sqrt(inv_m_eff)
 
-        # Sigmas basés sur la masse effective correcte
-        sigma_phys = math.sqrt(units.kB * temp_phys * inv_m_eff)
-        sigma_bias = math.sqrt(units.kB * temp_bias * inv_m_eff)
+        # Vecteurs unitaires (e_R_config = e_R, M_e_R = M * e_R)
+        e_R_config = (g_R / m_3n) / norm_g_R  # Dimension [1/sqrt(masse)]
+        M_e_R = g_R / norm_g_R  # Dimension [sqrt(masse)]
 
-        # --- 3. Sampling ---
-        # Normal component: Rayleigh at biased temperature
-        v_R_sampled = sample_rayleigh(sigma_bias, rng=rng)
-        w_R = (g_R / m_3n) / inv_m_eff
+        # Sigma thermique pour le moment : sigma_p = sqrt(k_B * T)
+        # Note : p_n^2 / (2 * sigma_p^2) est adimensionnel
+        sigma_p_phys = math.sqrt(units.kB * temp_phys)
+        sigma_p_bias = math.sqrt(units.kB * temp_bias)
+        # --- 3. Sampling du Moment p ---
+        # Moment normal p_n (Rayleigh)
+        p_n_sampled = sample_rayleigh(sigma_p_bias, rng=rng)
 
-        # Tangential components: standard Maxwell-Boltzmann at physical temperature
-        v_thermal_3n = np.sqrt(units.kB * temp_phys / m_3n)
-        v_full_MB = rng.normal(0, v_thermal_3n)
+        # Composantes tangentielles (Maxwell-Boltzmann p ~ N(0, M/beta))
+        p_th = rng.normal(0, sigma_p_phys * np.sqrt(m_3n))
 
-        # Remove any normal component from the thermal MB draw and add our biased v_R
-        v_perp = v_full_MB - np.dot(v_full_MB, g_R) * w_R
-        v_final_flat = v_R_sampled * w_R + v_perp
+        # Projection pour obtenir p_perp (orthogonal à e_R au sens de M^-1)
+        # p_perp = p_th - (p_th^T e_R) * M_e_R
+        p_perp = p_th - np.dot(p_th, e_R_config) * M_e_R
 
-        m_eff_R = 1.0 / inv_m_eff  # Masse effective réelle
+        # Synthèse du moment total : p = p_n * M_e_R + p_perp
+        p_final = p_n_sampled * M_e_R + p_perp
+
+        # --- 4. Calcul du poids (Section 3.2 LaTeX) ---
         temp_ratio = temp_bias / temp_phys
-        energy_factor = (m_eff_R * v_R_sampled**2) / (2.0 * units.kB)
+        # p_n_sampled est déjà un moment, l'énergie est p_n^2 / 2
+        energy_factor = (p_n_sampled ** 2) / (2.0 * units.kB)
         diff_beta = (1.0 / temp_phys) - (1.0 / temp_bias)
 
         weight = temp_ratio * math.exp(-energy_factor * diff_beta)
 
         # --- 5. Finalize Atoms object ---
-        atoms.set_momenta(atoms.get_masses()[:, np.newaxis] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
+        atoms.set_momenta(p_final.reshape((-1, 3)), apply_constraint=False)
         if not hasattr(atoms, 'info'):
             atoms.info = {}
         atoms.info["weight_ini_cond"] = weight
@@ -309,6 +315,7 @@ class BaseInitialConditionSampler(ABC):
         beta = 1 / (units.kB * temp)
         masses = atoms.get_masses()
         m_3n = np.repeat(masses, 3)  # Mass vector flattened to 3N
+        sigma_p_R = math.sqrt(units.kB * temp)
 
         # 1. Geometrical Directions Calculation
         # Identify the index of the current state R
@@ -366,54 +373,57 @@ class BaseInitialConditionSampler(ABC):
         # Bias Direction (Reaction Coordinate)
         g_xi = self.xi.rc_grad(atoms).flatten()
 
-        # 2. Mass and Variance Parameters (CORRIGÉ)
-        # Calcul correct des masses effectives inverses
-        inv_m_eff_xi = max(np.sum((g_xi ** 2) / m_3n), 1e-14)
-        inv_m_eff_R = max(np.sum((g_R ** 2) / m_3n), 1e-14)
+        # Normalisation métrique (Mass-weighted)
+        norm_g_R = math.sqrt(np.sum((g_R ** 2) / m_3n))
+        norm_g_xi = math.sqrt(np.sum((g_xi ** 2) / m_3n))
 
-        # Sigmas corrects
-        sigma_R = math.sqrt(units.kB * temp * inv_m_eff_R)
-        # Paramètres pour la direction de biais xi
-        # v_thermal_xi est l'écart type de la vitesse thermique selon xi
-        v_thermal_xi = math.sqrt(units.kB * temp * inv_m_eff_xi)
+        # Vecteurs unitaires et duals
+        e_R_config = (g_R / m_3n) / norm_g_R
+        e_xi_config = (g_xi / m_3n) / norm_g_xi
+        M_e_R = g_R / norm_g_R
+        M_e_xi = g_xi / norm_g_xi
 
-        # 3. Define the Bias Shift Vector u_alpha
-        u_direction = (g_xi / m_3n) / inv_m_eff_xi
-        u_alpha = (alpha * v_thermal_xi) * u_direction
-        u_R_raw = np.dot(u_alpha, g_R)
-        # --- SÉCURITÉ 2 : Clamping ---
-        # Théoriquement, u_R / sigma_R = alpha * cos(theta).
-        # On force ce ratio à rester dans les bornes [-alpha, alpha]
-        u_R = np.clip(u_R_raw, -alpha * sigma_R, alpha * sigma_R)
+        # Corrélation géométrique (rho)
+        rho_R_xi = np.dot(e_xi_config, M_e_R)
 
-        # 4. Normal Velocity Sampling (v_R)
-        v_R_sampled = sample_biased_v_r(u_R, sigma_R, rng=rng)
+        # --- 3. SÉCURITÉ 1 : Clipping du Décalage ---
+        # On calcule le décalage théorique u_p_R
+        u_p_R_raw = alpha * sigma_p_R * rho_R_xi
+        # Protection : rho ne doit jamais dépasser 1 en valeur absolue.
+        # Des erreurs numériques sur des systèmes complexes peuvent l'induire.
+        u_p_R = np.clip(u_p_R_raw, -alpha * sigma_p_R, alpha * sigma_p_R)
 
-        # 5. Tangential Components Sampling (Shifted Gaussian)
-        # Generate thermal noise shifted by u_alpha
-        w_R = (g_R / m_3n) / inv_m_eff_R
-        v_thermal_3n = 1.0 / np.sqrt(beta * m_3n)
-        v_full = u_alpha + rng.normal(0, v_thermal_3n)
+        # --- 4. Sampling ---
+        p_n_sampled = sample_biased_p_r(u_p_R, sigma_p_R, rng=rng)
 
-        # Projection to ensure v_R_sampled is preserved on the normal axis
-        v_perp = v_full - np.dot(v_full, g_R) * w_R
-        v_final_flat = v_R_sampled * w_R + v_perp
+        # Bruit thermique translaté par le boost alpha selon la coordonnée de réaction
+        delta_p = (alpha * sigma_p_R) * M_e_xi
+        p_th = rng.normal(0, sigma_p_R * np.sqrt(m_3n))
+        p_full = delta_p + p_th
 
-        # 6. Weight Calculation W(v)
-        p_0, z_star = _get_v_r_constants(u_R, sigma_R)
-        R_Z = z_star / (sigma_R ** 2)
-        v_dot_xi = np.dot(v_final_flat, g_xi)
-        arg_exp = -alpha * (v_dot_xi / v_thermal_xi) + (alpha ** 2 / 2.0)
+        # Retrait de la composante normale pour injecter p_n_sampled
+        p_perp = p_full - np.dot(p_full, e_R_config) * M_e_R
+        p_final = p_n_sampled * M_e_R + p_perp
+
+        # --- 5. SÉCURITÉ 2 : Calcul du Poids via Logarithme ---
+        p_0, z_star = _get_p_r_constants(u_p_R, sigma_p_R)
+        R_Z = z_star / (sigma_p_R ** 2)
+
+        p_xi = np.dot(p_final, e_xi_config)
+        arg_exp = -alpha * (p_xi / sigma_p_R) + (alpha ** 2 / 2.0)
+
+        # Calcul sécurisé : log(W) = log(R_Z) + arg_exp
         log_weight = math.log(R_Z) + arg_exp
-        # On limite le poids pour éviter l'OverflowError final
+
+        # Seuil d'overflow pour float64 (~exp(709))
         if log_weight > 700:
-            weight = 1e308  # Valeur maximale représentable
-            print(f"Warning: Weight capped for alpha={alpha} (log_w={log_weight:.2f})")
+            weight = 1e308
+            print(f"Warning: Poids plafonné (log_w={log_weight:.2f})")
         else:
             weight = math.exp(log_weight)
 
-        # Update the Atoms object
-        atoms.set_momenta(atoms.get_masses()[:, np.newaxis] * v_final_flat.reshape((-1, 3)), apply_constraint=False)
+        # --- 6. Mise à jour de l'objet Atoms ---
+        atoms.set_momenta(p_final.reshape((-1, 3)), apply_constraint=False)
         if not hasattr(atoms, "info"):
             atoms.info = {}
         atoms.info["weight_ini_cond"] = weight
@@ -421,46 +431,27 @@ class BaseInitialConditionSampler(ABC):
         return atoms
 
     def bias_initial_conditions(
-        self,
-        input_dir,
-        output_dir,
-        temp,
-        alpha=0.0,
-        temp_bias=None,
-        method="flux",
-        rng=None,
-        overwrite=False,
+            self,
+            input_dir,
+            output_dir,
+            temp,
+            alpha=0.0,
+            temp_bias=None,
+            method="flux",
+            n_draws=1,  # Nouveau paramètre
+            rng=None,
+            overwrite=False,
     ):
         """
-        Apply velocity biasing to all initial conditions in a directory using either
-        Flux Biasing or Rayleigh Biasing.
+        Applique le biaisage de vitesse à toutes les conditions initiales d'un répertoire,
+        en effectuant éventuellement plusieurs tirages par configuration.
 
         Parameters:
         -----------
-        input_dir : str
-            Path to the directory containing the original .extxyz configurations.
-        output_dir : str
-            Path where the biased configurations will be written.
-        temp : float
-            The physical reference temperature (Kelvin).
-        alpha : float, optional
-            Dimensionless bias parameter for 'flux' method. Defaults to 0.0.
-        temp_bias : float, optional
-            The increased temperature (Kelvin) for the 'rayleigh' method.
-            Required if method='rayleigh'.
-        method : str
-            The biasing scheme to use: 'flux' or 'rayleigh'. Defaults to 'flux'.
-        rng : np.random.Generator, optional
-            Random number generator for reproducibility.
-        overwrite : bool, optional
-            If True, existing files in output_dir will be overwritten.
-
-        Returns:
-        --------
-        summary : dict
-            A dictionary containing processing statistics, weights, and file paths.
+        ... (identique) ...
+        n_draws : int
+            Nombre de vecteurs de vitesse à générer pour chaque configuration de position.
         """
-        # 1. Validation and Directory Setup
         if method not in ["flux", "rayleigh"]:
             raise ValueError("method must be either 'flux' or 'rayleigh'")
 
@@ -474,46 +465,64 @@ class BaseInitialConditionSampler(ABC):
             os.makedirs(output_dir, exist_ok=True)
         barrier()
 
-        # 2. File Collection
         input_files = sorted([f for f in os.listdir(input_dir) if f.endswith(".extxyz")])
         if not input_files:
             raise FileNotFoundError(f"No .extxyz files found in {input_dir}")
 
-        weights = []
-        output_files = []
+        all_weights = []
+        all_output_paths = []
 
-        # 3. Processing Loop
+        # Utilisation d'un RNG par défaut si non fourni
+        if rng is None:
+            rng = np.random.default_rng()
+
         for fname in input_files:
             in_path = os.path.join(input_dir, fname)
-            out_path = os.path.join(output_dir, fname)
+            atoms_orig = read(in_path)
+            base_name = os.path.splitext(fname)[0]
 
-            if os.path.exists(out_path) and not overwrite:
-                if world.rank == 0:
-                    print(f"Skipping existing file: {out_path}")
-                continue
+            # --- Boucle de tirages multiples ---
+            for i in range(n_draws):
+                # On crée un suffixe pour différencier les tirages
+                draw_suffix = f"_draw_{i + 1}" if n_draws > 1 else ""
+                out_fname = f"{base_name}{draw_suffix}.extxyz"
+                out_path = os.path.join(output_dir, out_fname)
 
-            atoms = read(in_path)
+                if os.path.exists(out_path) and not overwrite:
+                    continue
 
-            # Select the biasing method
-            if method == "flux":
-                # Uses the Newton-Raphson scheme with shift alpha
-                biased_atoms = self.bias_one_initial_condition_flux(atoms, alpha=alpha, temp=temp, rng=rng)
-            else:
-                # Uses the Rayleigh distribution at temp_bias
-                biased_atoms = self.bias_one_initial_condition_rayleigh(atoms, temp_phys=temp, temp_bias=temp_bias, rng=rng)
+                # Copie profonde pour éviter de polluer l'objet original
+                atoms = atoms_orig.copy()
 
-            # Save to output directory
-            write(out_path, biased_atoms, format="extxyz")
+                if method == "flux":
+                    # Utilise la fonction avec les sécurités (clipping, log_weight)
+                    biased_atoms = self.bias_one_initial_condition_flux(
+                        atoms, alpha=alpha, temp=temp, rng=rng
+                    )
+                else:
+                    biased_atoms = self.bias_one_initial_condition_rayleigh(
+                        atoms, temp_phys=temp, temp_bias=temp_bias, rng=rng
+                    )
 
-            weights.append(biased_atoms.info.get("weight_ini_cond", np.nan))
-            output_files.append(out_path)
+                # Sauvegarde
+                write(out_path, biased_atoms, format="extxyz")
+
+                # Stockage des métadonnées
+                weight = biased_atoms.info.get("weight_ini_cond", 1.0)
+                all_weights.append(weight)
+                all_output_paths.append(out_path)
 
         summary = {
-            "n_processed": len(output_files),
+            "n_input_configs": len(input_files),
+            "n_draws_per_config": n_draws,
+            "total_generated": len(all_output_paths),
             "method_used": method,
-            "weight_ini_cond": weights,
-            "output_files": output_files,
+            "weights": all_weights,
+            "output_files": all_output_paths,
         }
+
+        if world.rank == 0:
+            print(f"Done. Generated {len(all_output_paths)} biased configurations.")
 
         return summary
 
