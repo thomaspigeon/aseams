@@ -37,85 +37,82 @@ def sample_rayleigh(sigma, rng=None):
     return sigma * math.sqrt(-2.0 * math.log(1.0 - u))
 
 
-def _get_p_r_constants(u_R, sigma_R):
+def _get_p_r_constants(delta_p_R, sigma_p_R):
     """
-    Calcule p_0 et Z_star de manière robuste pour le moment normal décalé.
-    u_n : décalage (alpha * sigma_n * rho)
-    sigma_n : sqrt(k_B T)
+    Calcule p_0 (densité non normalisée en 0) et Z_star (constante de normalisation)
+    de manière numériquement stable pour la loi de Rayleigh décalée.
+
+    delta_p_R : décalage scalaire (alpha * sigma_p_R * rho_R_xi)
+    sigma_p_R : écart-type thermique (sqrt(k_B * T))
     """
-    # Calcul de p_0 (valeur de la densité non normalisée en 0)
-    # Nécessaire pour l'algo de Newton
-    p_0 = math.exp(-u_R ** 2 / (2 * sigma_R ** 2))
+    # p_0 = exp(- (delta_p_R^2) / (2 * sigma_p_R^2))
+    # Utile pour l'échantillonnage (valeur max ou valeur en 0)
+    p_0 = math.exp(-delta_p_R ** 2 / (2 * sigma_p_R ** 2))
 
-    # Calcul robuste de Z_star
-    # On utilise l'identité analytique :
-    # Z* = sigma^2 * exp(-u^2/2sigma^2) + u * sigma * sqrt(2pi) * Phi(u/sigma)
-    # Mais formulée avec erfcx pour éviter les overflows/underflows :
+    # Calcul robuste de Z_star via erfcx pour éviter les overflows d'exponentielles
+    # Argument pour erfcx : x = - delta_p_R / (sqrt(2) * sigma_p_R)
+    x = -delta_p_R / (math.sqrt(2) * sigma_p_R)
 
-    x = -u_R / (math.sqrt(2) * sigma_R)
-    # erfcx(x) = exp(x^2) * erfc(x). C'est toujours > 0.
+    # term_erfcx = (delta_p_R / sigma_p_R) * sqrt(pi/2) * erfcx(x)
+    term_erfcx = (delta_p_R / sigma_p_R) * math.sqrt(math.pi / 2) * erfcx(x)
 
-    # Le terme intégral exact s'écrit :
-    # Z* = sigma^2 * exp(-u^2/2sigma^2) * [ 1 + u/sigma * sqrt(pi/2) * erfcx( -u / (sqrt(2)*sigma) ) ]
-
-    term_erfcx = (u_R / sigma_R) * math.sqrt(math.pi / 2) * erfcx(x)
-
-    # Facteur pré-exponentiel (attention p_0 contient déjà l'exp)
-    # Z_star = p_0 * sigma^2 * (1 + term_erfcx_scaled...)
-    # Plus simplement, on réutilise p_0 calculé au dessus :
-
-    z_star = (sigma_R ** 2) * p_0 * (1.0 + term_erfcx)
+    # Z_star = sigma_p_R^2 * exp(-delta_p_R^2 / 2sigma_p_R^2) * (1 + term_erfcx)
+    z_star = (sigma_p_R ** 2) * p_0 * (1.0 + term_erfcx)
 
     return p_0, z_star
 
 
-def sample_biased_p_r(u_R, sigma_R, rng=None):
+def sample_biased_p_r(delta_p_R, sigma_p_R, rng=None):
     """
-    Échantillonne le moment normal p_n selon une Rayleigh décalée.
+    Échantillonne le moment normal p_R selon une distribution de Rayleigh décalée
+    en utilisant la méthode d'inversion de la CDF par recherche de racine.
     """
     if rng is None:
         rng = np.random.default_rng()
+
+    # Tirage uniforme pour l'inversion de la CDF
     U = rng.uniform(1e-10, 1.0 - 1e-10)
 
-    # 1. Calcul des constantes de normalisation
-    p_0, z_star = _get_p_r_constants(u_R, sigma_R)
+    # 1. Calcul des constantes de normalisation via la fonction harmonisée
+    _, z_star = _get_p_r_constants(delta_p_R, sigma_p_R)
 
-    # 2. Définition de G(v) = CDF(v) - U
-    # On utilise l'identité : CDF(v) = 1 - (f(v) / f(0))
-    # où f(0) est proportionnel à z_star.
-    def G_func(v):
-        if v <= 0: return -U
+    def G_func(p_R):
+        """Fonction G(p_R) = CDF(p_R) - U. On cherche G(p_R) = 0."""
+        if p_R <= 0: return -U
 
-        # y_v = (v - u_R) / (sqrt(2) * sigma_R)
-        # y_0 = -u_R / (sqrt(2) * sigma_R)
-        y_v = (v - u_R) / (1.4142135623730951 * sigma_R)
-        y_0 = -u_R / (1.4142135623730951 * sigma_R)
+        # Variables intermédiaires pour erfcx (stabilité numérique)
+        sqrt2 = math.sqrt(2.0)
+        sqrt_pi_2 = math.sqrt(math.pi / 2.0)
 
-        # Calcul du ratio f(v)/f(0) de façon stable
-        # ratio = exp(y_0^2 - y_v^2) * [ (sigma + u*sqrt(pi/2)*erfcx(y_v)) / (sigma + u*sqrt(pi/2)*erfcx(y_0)) ]
-        arg_exp = (v * (2 * u_R - v)) / (2 * sigma_R ** 2)
-        num = sigma_R + u_R * 1.2533141373155001 * erfcx(y_v)
-        den = sigma_R + u_R * 1.2533141373155001 * erfcx(y_0)
+        y_p_R = (p_R - delta_p_R) / (sqrt2 * sigma_p_R)
+        y_0 = -delta_p_R / (sqrt2 * sigma_p_R)
 
-        ratio = math.exp(arg_exp) * (num / den)
-        return (1.0 - ratio) - U
+        # Calcul du ratio (1 - CDF) de façon stable :
+        # Le ratio correspond à Integral(p_R to inf) / Integral(0 to inf)
+        arg_exp = (p_R * (2 * delta_p_R - p_R)) / (2 * sigma_p_R ** 2)
+        num = sigma_p_R + delta_p_R * sqrt_pi_2 * erfcx(y_p_R)
+        den = sigma_p_R + delta_p_R * sqrt_pi_2 * erfcx(y_0)
 
-    def G_prime(v):
-        # La dérivée est simplement la PDF : p(v) = (v/z_star) * exp(-(v-u_R)^2 / 2sigma^2)
-        arg_exp = -(v - u_R) ** 2 / (2 * sigma_R ** 2)
-        return (v / z_star) * math.exp(arg_exp)
+        one_minus_cdf = math.exp(arg_exp) * (num / den)
+        return (1.0 - one_minus_cdf) - U
 
-    # 3. Résolution robuste
-    # Estimation du mode de la distribution pour un bon x0
-    # Le mode de v*exp(-(v-u)^2/2s^2) est (u + sqrt(u^2 + 4s^2))/2
-    x0 = (u_R + math.sqrt(u_R ** 2 + 4 * sigma_R ** 2)) / 2.0
+    def G_prime(p_R):
+        """La dérivée de la CDF est la PDF de la Rayleigh décalée."""
+        arg_exp = -(p_R - delta_p_R) ** 2 / (2 * sigma_p_R ** 2)
+        return (p_R / z_star) * math.exp(arg_exp)
+
+    # 3. Résolution par méthode de Newton
+    # Le mode de la distribution est une excellente estimation initiale x0 :
+    # mode = (delta_p_R + sqrt(delta_p_R^2 + 4 * sigma_p_R^2)) / 2
+    x0 = (delta_p_R + math.sqrt(delta_p_R ** 2 + 4 * sigma_p_R ** 2)) / 2.0
 
     try:
-        return newton(func=G_func, x0=x0, fprime=G_prime, tol=1e-8, maxiter=50)
+        # Newton est rapide car la PDF est lisse et unimodale
+        return newton(func=G_func, x0=x0, fprime=G_prime, tol=1e-8, maxiter=5000)
     except RuntimeError:
-        # Fallback sur Brentq si Newton échoue (plus lent mais garanti si les signes diffèrent)
-        # On définit une borne supérieure sécurisée (10 sigmas après le centre)
-        upper_bound = max(10.0 * sigma_R, u_R + 10.0 * sigma_R)
+        # Fallback sécurisé sur Brentq (méthode de bissection améliorée)
+        # On définit une borne supérieure à 10 sigmas pour couvrir le support
+        upper_bound = max(10.0 * sigma_p_R, delta_p_R + 10.0 * sigma_p_R)
         from scipy.optimize import brentq
         return brentq(G_func, 0, upper_bound)
 
@@ -388,25 +385,25 @@ class BaseInitialConditionSampler(ABC):
 
         # --- 3. SÉCURITÉ 1 : Clipping du Décalage ---
         # On calcule le décalage théorique u_p_R
-        u_p_R_raw = alpha * sigma_p_R * rho_R_xi
+        delta_p_R_raw = alpha * sigma_p_R * rho_R_xi
         # Protection : rho ne doit jamais dépasser 1 en valeur absolue.
         # Des erreurs numériques sur des systèmes complexes peuvent l'induire.
-        u_p_R = np.clip(u_p_R_raw, -alpha * sigma_p_R, alpha * sigma_p_R)
+        delta_p_R = np.clip(delta_p_R_raw, -alpha * sigma_p_R, alpha * sigma_p_R)
 
         # --- 4. Sampling ---
-        p_n_sampled = sample_biased_p_r(u_p_R, sigma_p_R, rng=rng)
+        p_n_sampled = sample_biased_p_r(delta_p_R, sigma_p_R, rng=rng)
 
         # Bruit thermique translaté par le boost alpha selon la coordonnée de réaction
-        delta_p = (alpha * sigma_p_R) * eta_xi
+        delta_p_vec = (alpha * sigma_p_R) * eta_xi
         p_th = rng.normal(0, sigma_p_R * np.sqrt(m_3n))
-        p_full = delta_p + p_th
+        p_full = delta_p_vec + p_th
 
         # Retrait de la composante normale pour injecter p_n_sampled
         p_perp = p_full - np.dot(p_full, e_R_config) * eta_R
         p_final = p_n_sampled * eta_R + p_perp
 
         # --- 5. SÉCURITÉ 2 : Calcul du Poids via Logarithme ---
-        p_0, z_star = _get_p_r_constants(u_p_R, sigma_p_R)
+        _, z_star = _get_p_r_constants(delta_p_R, sigma_p_R)
         R_Z = z_star / (sigma_p_R ** 2)
 
         p_xi = np.dot(p_final, e_xi_config)
