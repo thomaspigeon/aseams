@@ -452,6 +452,7 @@ class CollectiveVariables:
                     else:
                         self.p_crit.append(p_crit[i])
 
+
     def set_in_p_boundary(self, in_p_boundary):
         """Set the numerical value of the boundary to indentify whether a structure is in P state.
 
