@@ -7,7 +7,7 @@ import ase.units as units
 from scipy.stats import rayleigh
 
 
-from src.aseams.cvs import CollectiveVariables
+from aseams.cvs import CollectiveVariables
 
 def distance(atoms):
     return atoms.get_distance(0, 1, mic=True)

@@ -13,7 +13,7 @@ from .inicondssamplers import (
     MultiWalkerSampler,
     FileBasedSampler,
 )
-from .ams import AMS  # assuming your AMS control class exists
+from .ams import AMS
 
 __all__ = [
     "CollectiveVariables",

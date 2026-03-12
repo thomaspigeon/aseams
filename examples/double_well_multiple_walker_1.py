@@ -6,9 +6,9 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 import ase.units as units
 
-from src.aseams import CollectiveVariables
-from src.aseams import MultiWalkerSampler
-from src.aseams.utils.langevinOBABO import LangevinOBABO
+from aseams import CollectiveVariables
+from aseams import MultiWalkerSampler
+from aseams.utils.langevinOBABO import LangevinOBABO
 # # Initial state.
 atoms = Atoms("N2", positions=[[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]])  # Start from contact pair COM at 0,0,0
 

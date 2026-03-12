@@ -8,9 +8,9 @@ from ase.parallel import parprint, world, barrier
 
 # Import your custom classes
 from double_well_calculator import DoubleWell
-from src.aseams.cvs import CollectiveVariables
-from src.aseams.inicondssamplers import SingleWalkerSampler
-from src.aseams.utils.langevinOBABO import LangevinOBABO
+from aseams.cvs import CollectiveVariables
+from aseams.inicondssamplers import SingleWalkerSampler
+from aseams.utils.langevinOBABO import LangevinOBABO
 
 
 def run_direct_mc_batch(input_dir, cv, temp, friction, timestep, calc, max_steps=10000, rng_seed=0):

@@ -6,11 +6,11 @@ from ase.io import read, write
 import ase.units as units
 
 # Import des classes personnalisées
-from src.aseams.ams import AMS
-from src.aseams.cvs import CollectiveVariables
-from src.aseams.inicondssamplers import SingleWalkerSampler
+from aseams.ams import AMS
+from aseams.cvs import CollectiveVariables
+from aseams.inicondssamplers import SingleWalkerSampler
 from ase.parallel import parprint, world, barrier
-from src.aseams.utils.langevinOBABO import LangevinOBABO
+from aseams.utils.langevinOBABO import LangevinOBABO
 
 # =====================================================================
 # 1. PARAMÈTRES DE LA SIMULATION
