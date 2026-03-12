@@ -22,7 +22,7 @@ from ase.parallel import world, paropen, barrier
 from ase.constraints import FixCom
 from scipy.special import erfcx, erfc
 
-from src.aseams.ams import NumpyEncoder
+from aseams.ams import NumpyEncoder
 
 
 def sample_rayleigh(sigma, rng=None):
