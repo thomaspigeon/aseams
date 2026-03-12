@@ -7,10 +7,10 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 import ase.units as units
 from ase.parallel import parprint, world, barrier
 
-from src.aseams import AMS
-from src.aseams import CollectiveVariables
-from src.aseams import SingleWalkerSampler
-from src.aseams.utils.langevinOBABO import LangevinOBABO
+from aseams import AMS
+from aseams import CollectiveVariables
+from aseams import SingleWalkerSampler
+from aseams.utils.langevinOBABO import LangevinOBABO
 
 
 # =====================================================================

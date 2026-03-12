@@ -11,14 +11,30 @@ authors = [
     {name = "Hadrien Vroylandt", email = "hadrien.vroylandt@unicaen.fr"},
     {name = "Pierre Marmey", email = "pierre.marmey2@ifpen.fr"},
 ]
+readme = "README.md"
+requires-python = ">=3.8"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 dependencies = [
     "numpy>=1.22",
     "scipy>=1.8",
     "ase>=3.22",
 ]
-license = { text = "GPL-3.0-or-later" }
-requires-python = ">=3.8"
-readme = "README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://github.com/thomaspigeon/aseams"
+Repository = "https://github.com/thomaspigeon/aseams"
 
 [project.optional-dependencies]
 dev = [
@@ -29,8 +45,12 @@ dev = [
     "build",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["aseams", "aseams.*"]
 
 [tool.black]
 line-length = 88
@@ -38,12 +58,25 @@ target-version = ["py39"]
 
 [tool.isort]
 profile = "black"
+src_paths = ["src", "tests"]
+known_first_party = ["aseams"]
+default_section = "THIRDPARTY"
+force_grid_wrap = 0
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
 
-# Optional classifier section:
-classifiers = [
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
-    "Programming Language :: Python :: 3",
-    "Intended Audience :: Science/Research",
-    "Topic :: Scientific/Engineering :: Chemistry",
-    "Topic :: Scientific/Engineering :: Physics",
-]
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/aseams"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
