@@ -220,9 +220,9 @@ class AMS:
 
         existing_reps = [int(fi.split(".")[0].split("_")[-1]) for fi in os.listdir(self.ams_dir) if fi.startswith("rep_") and fi.endswith(".traj")]
         for i in existing_reps.copy():
-            self.z_maxs[i] = np.max(np.loadtxt(self.ams_dir + "/rc_rep_" + str(i) + ".txt"))
             try:
                 read_traj = read(filename=self.ams_dir + "/rep_" + str(i) + ".traj", format="traj", index=":")
+                self.z_maxs[i] = np.max([atoms.info["rc"] for atoms in read_traj])
                 self._set_initialcond_dyn(read_traj[-1])
                 self._until_r_or_p(i, len(read_traj))
                 self._write_checkpoint()
