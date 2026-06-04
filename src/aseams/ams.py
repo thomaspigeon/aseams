@@ -27,7 +27,19 @@ class NumpyEncoder(json.JSONEncoder):
 class AMS:
     """Running AMS"""
 
-    def __init__(self, n_rep, k_min, dyn, xi, fixcm=True, cv_interval=1, rc_threshold=0.0, save_all=False, max_length_iter=np.inf, verbose=False, rng=None):
+    def __init__(self,
+                 n_rep,
+                 k_min,
+                 dyn,
+                 xi,
+                 fixcm=True,
+                 save_trajectories_dir=None,
+                 cv_interval=1,
+                 rc_threshold=0.0,
+                 save_all=False,
+                 max_length_iter=np.inf,
+                 verbose=False,
+                 rng=None):
         """
         Parameters:
 
@@ -57,8 +69,13 @@ class AMS:
         save_all: boolean
             whether all the trajectories of the replicas should be saved. If false, only the current state of the
             replicas is written in the AMS.current_replicas_dir
+
         verbose: boolean
             Should AMS print information about progression
+
+        save_trajectories_dir: str, optional
+            Path to a directory where the initial trajectories of the replicas will be saved. If None, no trajectories
+            will be saved.
         """
         if isinstance(n_rep, int) and n_rep > 1:
             self.n_rep = n_rep
@@ -104,6 +121,10 @@ class AMS:
         self.rc_threshold = rc_threshold
         self.max_length_iter = max_length_iter
         self.verbose = verbose
+        self.save_trajectories_dir = save_trajectories_dir
+        if self.save_trajectories_dir is not None:
+            if not os.path.exists(self.save_trajectories_dir):
+                os.makedirs(self.save_trajectories_dir)
 
     def set_ini_cond_dir(self, ini_cond_dir="./ini_conds"):
         """Where the initial conditions for AMS will be written, raise error if the directory does not exist or is empty"""
@@ -234,6 +255,9 @@ class AMS:
             self._pick_ini_cond(rep_index=i)
             self._until_r_or_p(i, 0)
             self._write_checkpoint()
+            if self.save_trajectories_dir:
+                traj = read(self.ams_dir + f"/rep_{i}.traj", index=':')
+                write(f"{self.save_trajectories_dir}/rep_{i}_initial.traj", traj)
         self.current_p = np.sum(self.rep_weights)
         self.initialized = True
         self._write_checkpoint()
