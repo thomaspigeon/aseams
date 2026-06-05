@@ -121,6 +121,8 @@ class AMS:
         self.rc_threshold = rc_threshold
         self.max_length_iter = max_length_iter
         self.verbose = verbose
+        self.nr_lengths = []
+        self.nr_weights = []
         self.save_trajectories_dir = save_trajectories_dir
         if self.save_trajectories_dir is not None:
             if not os.path.exists(self.save_trajectories_dir):
@@ -264,15 +266,21 @@ class AMS:
 
     def _branch_replica(self, i, j, z_kill):
         """Branch replica i by copying replica j until z_kill and run the dynamics until it reaches either R or P"""
+        try:
+            killed_traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
+            self.nr_lengths.append(len(killed_traj))
+            self.nr_weights.append(copy(self.rep_weights[i]))
+        except Exception:
+            parprint("/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + "length not seen")
         if self.save_all and world.rank == 0:
             traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
             for atoms in traj:
                 atoms.info['replica_weight'] = copy(self.rep_weights[i])
             write(self.ams_dir + "/nr_rep_" + str(i) + "_killed_at_" + str(self.ams_it) + ".traj", traj)
-        self.rep_weights[i] = copy(self.rep_weights[j])
         if world.rank == 0:
             os.remove(self.ams_dir + "/rep_" + str(i) + ".traj")
         barrier()
+        self.rep_weights[i] = copy(self.rep_weights[j])
         branched_rep = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
         branched_rep_rc = np.array([atoms.info['rc'] for atoms in branched_rep])
         indices_above = np.flatnonzero(branched_rep_rc >= z_kill - self.rc_threshold)
@@ -391,6 +399,8 @@ class AMS:
         self.finished = checkpoint_data["finished"]
         self.success = checkpoint_data["success"]
         self.rep_weights = checkpoint_data["rep_weights"]
+        self.nr_lengths = checkpoint_data.get("nr_lengths", [])
+        self.nr_weights = checkpoint_data.get("nr_weights", [])
         self.z_kill = checkpoint_data["z_kill"]
         self.killed = checkpoint_data["killed"]
         self.current_p = checkpoint_data["current_p"]
@@ -403,6 +413,8 @@ class AMS:
         checkpoint_data = {
             "z_maxs": self.z_maxs,
             "rep_weights": self.rep_weights,
+            "nr_lengths": self.nr_lengths,
+            "nr_weights": self.nr_weights,
             "nsteps": self.dyn.nsteps,
             "killed": self.killed,
             "alive": self.alive,
