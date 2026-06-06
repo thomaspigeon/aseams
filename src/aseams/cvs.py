@@ -220,7 +220,7 @@ class CollectiveVariables:
                             and isinstance(sigma_r_level[i][0], float)
                             and isinstance(sigma_r_level[i][1], float)
                             and (sigma_r_level[i][0] <= self.in_r_boundary[i][0])
-                            and (self.in_r_boundary[i][1] >= self.sigma_r_level[i][1])
+                            and (self.in_r_boundary[i][1] >= sigma_r_level[i][1])
                         ):
                             raise ValueError(
                                 """When cv_r is a list of functions and r_crit[i] is "between",
