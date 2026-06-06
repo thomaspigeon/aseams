@@ -1560,7 +1560,7 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
         pour que la classe ReplicaWithMC puisse s'y retrouver.
         """
         self.run_dir = run_dir
-        walker_dir = os.path.join(self.run_dir, str(self.w_i))
+        walker_dir = self.run_dir + str(self.w_i)
 
         if not os.path.exists(walker_dir) and world.rank == 0:
             os.makedirs(walker_dir, exist_ok=True)
