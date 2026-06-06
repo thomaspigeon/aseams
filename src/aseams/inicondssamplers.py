@@ -1683,7 +1683,7 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
             write(fname, biased_atoms, format="extxyz")
 
             n_cdt += 1
-            self._write_checkpoint(os.path.join(self.run_dir, str(self.w_i), f"ini_checkpoint_{self.w_i}.txt"))
+            self._write_checkpoint(os.path.join(self.run_dir + str(self.w_i), f"ini_checkpoint_{self.w_i}.txt"))
 
 
 
