@@ -1485,8 +1485,8 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
             walker_index=0,
             equilibration_steps=1000,
             decorrelation_steps=100,
-            mc_interval=50,
-            mc_history_size=20,
+            mc_freqency=50,
+            mc_history_size=2000,
             method="flux",
             alpha=0.0,
             temp=300.0,
@@ -1513,8 +1513,8 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
             Nombre de pas de MD initiaux pour la thermalisation.
         decorrelation_steps : int
             Nombre de pas de MD entre l'extraction de deux conditions initiales.
-        mc_interval : int
-            Nombre de pas de MD entre chaque tentative de saut Monte Carlo.
+        mc_freqency : int
+            Nombre de pas conditions initiales entre chaque tentative de saut Monte Carlo.
         mc_history_size : int
             Nombre d'états passés (frames) considérés dans le réservoir pour le tirage MC.
         method : str
@@ -1543,7 +1543,7 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
         self.w_i = walker_index
         self.equilibration_steps = equilibration_steps
         self.decorrelation_steps = decorrelation_steps
-        self.mc_interval = mc_interval
+        self.mc_freqency = mc_freqency
         self.mc_history_size = mc_history_size
         self.method = method
         self.alpha = alpha
@@ -1608,28 +1608,83 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
 
         print(f"[Walker {self.w_i}] Steering terminé.")
 
-    def _run_with_mc(self, steps):
-        """
-        Fait avancer la dynamique tout en tentant des sauts Monte Carlo réguliers.
-        """
-        steps_done = 0
-        while steps_done < steps:
-            chunk = min(self.mc_interval, steps - steps_done)
-            self.dyn.run(chunk)
-            steps_done += chunk
+    def sample(self, n_conditions=100, n_steps=None):
+        if self.run_dir is None or self.ini_cond_dir is None:
+            raise ValueError("Les répertoires run_dir ou ini_cond_dir ne sont pas définis.")
 
-            # Tentative de saut Monte Carlo
-            try:
-                accepted, info = self.dyn.move_monte_carlo(self.mc_history_size)
-                # Si le saut est accepté, il faut s'assurer que les contraintes globales
-                # (comme le centre de masse) sont proprement réinitialisées sur la nouvelle géométrie.
-                if accepted and self.fixcm:
-                    self.dyn.atoms._constraints = []
-                    self.dyn.atoms.set_constraint(FixCom())
-            except Exception:
-                # Si les autres répliques n'ont pas encore écrit assez de données,
-                # ou en cas de conflit d'accès fichier, on ignore silencieusement pour ce tour.
-                pass
+        n_cdt = 0
+        conditions_sampled_counter = 0  # <--- Initialisation du compteur
+
+        if self.fixcm:
+            self.dyn.fix_com = True
+            self.dyn.atoms._constraints = []
+            self.dyn.atoms.set_constraint(FixCom())
+
+        prefix = f"walker_{self.w_i}_ini_cond_"
+        self.n_ini_conds_already = len(
+            [f for f in os.listdir(self.ini_cond_dir) if f.startswith(prefix) and f.endswith(".extxyz")])
+
+        # --- Etape A : Acheminement en douceur ---
+        self._steer_to_surface()
+
+        # --- Etape B : Phase d'équilibration initiale ---
+        self.dyn.run(self.equilibration_steps)
+
+        # --- Etape C : Production ---
+        while n_cdt < n_conditions:
+
+            # 1. Évolution sur la surface
+            self.dyn.run(self.decorrelation_steps)
+
+            # 2. Tentative de saut Monte Carlo conditionnelle
+            # On tente le saut uniquement une fois toutes les 10 conditions
+            conditions_sampled_counter += 1
+            if conditions_sampled_counter % self.mc_freqency == 0:
+                try:
+                    self.dyn.move_monte_carlo(self.mc_history_size)
+                    if self.fixcm:
+                        self.dyn.atoms._constraints = []
+                        self.dyn.atoms.set_constraint(FixCom())
+                except Exception:
+                    pass
+
+            # 3. Extraction d'une copie de la configuration courante
+            atoms = self.dyn.atoms.copy()
+
+            # 4. Récupération et calcul du poids de Fixman
+            G_M = atoms.info.get('G_M', None)
+            if G_M is None or G_M <= 0:
+                raise ValueError("G_M invalide ou manquant dans atoms.info.")
+
+            fixman_weight = 1.0 / math.sqrt(G_M)
+
+            # 5. Ajout des métadonnées
+            if getattr(atoms, 'info', None) is None:
+                atoms.info = {}
+            atoms.info["from_which_r"] = self.from_which_r
+            atoms.info["walker_id"] = self.w_i
+
+            # 6. Biaisage des vitesses
+            if self.method == "flux":
+                biased_atoms = self.bias_one_initial_condition_flux(
+                    atoms, alpha=self.alpha, temp=self.temp, rng=self.rng
+                )
+            else:
+                biased_atoms = self.bias_one_initial_condition_rayleigh(
+                    atoms, temp_phys=self.temp, temp_bias=self.temp_bias, rng=self.rng
+                )
+
+            # 7. Sauvegarde
+            bias_weight = biased_atoms.info.get("weight_ini_cond", 1.0)
+            biased_atoms.info["weight_ini_cond"] = bias_weight * fixman_weight
+            biased_atoms.info["weight_fixman"] = fixman_weight
+            biased_atoms.info["weight_bias"] = bias_weight
+
+            fname = os.path.join(self.ini_cond_dir, f"{prefix}{self.n_ini_conds_already + n_cdt + 1}.extxyz")
+            write(fname, biased_atoms, format="extxyz")
+
+            n_cdt += 1
+            self._write_checkpoint(os.path.join(self.run_dir, str(self.w_i), f"ini_checkpoint_{self.w_i}.txt"))
 
     def sample(self, n_conditions=100, n_steps=None):
         if self.run_dir is None or self.ini_cond_dir is None:
