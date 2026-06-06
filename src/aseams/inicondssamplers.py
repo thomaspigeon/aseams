@@ -1636,7 +1636,10 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
             # 1. Évolution sur la surface
             self.dyn.run(self.decorrelation_steps)
 
-            # 2. Tentative de saut Monte Carlo conditionnelle
+            # 2. Extraction d'une copie de la configuration courante
+            atoms = self.dyn.atoms.copy()
+
+            #3. Tentative de saut Monte Carlo conditionnelle
             # On tente le saut uniquement une fois toutes les 10 conditions
             conditions_sampled_counter += 1
             if conditions_sampled_counter % self.mc_freqency == 0:
@@ -1647,10 +1650,6 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
                         self.dyn.atoms.set_constraint(FixCom())
                 except Exception:
                     pass
-
-            # 3. Extraction d'une copie de la configuration courante
-            atoms = self.dyn.atoms.copy()
-
             # 4. Récupération et calcul du poids de Fixman
             G_M = atoms.info.get('G_M', None)
             if G_M is None or G_M <= 0:
@@ -1686,76 +1685,7 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
             n_cdt += 1
             self._write_checkpoint(os.path.join(self.run_dir, str(self.w_i), f"ini_checkpoint_{self.w_i}.txt"))
 
-    def sample(self, n_conditions=100, n_steps=None):
-        if self.run_dir is None or self.ini_cond_dir is None:
-            raise ValueError("Les répertoires run_dir ou ini_cond_dir ne sont pas définis.")
 
-        n_cdt = 0
-        if self.fixcm:
-            self.dyn.fix_com = True
-            self.dyn.atoms._constraints = []
-            self.dyn.atoms.set_constraint(FixCom())
-
-        # Décompte des conditions déjà présentes pour ce marcheur
-        prefix = f"walker_{self.w_i}_ini_cond_"
-        self.n_ini_conds_already = len(
-            [f for f in os.listdir(self.ini_cond_dir) if f.startswith(prefix) and f.endswith(".extxyz")])
-
-        # --- Etape A : Acheminement en douceur ---
-        self._steer_to_surface()
-
-        # --- Etape B : Phase d'équilibration globale (avec MC) ---
-        self._run_with_mc(self.equilibration_steps)
-
-        # --- Etape C : Production ---
-        while n_cdt < n_conditions:
-
-            # 1. Évolution sur la surface (avec MC) pour décorréler les échantillons
-            self._run_with_mc(self.decorrelation_steps)
-
-            # 2. Extraction d'une copie de la configuration courante
-            atoms = self.dyn.atoms.copy()
-
-            # 3. Récupération et calcul du poids de Fixman
-            G_M = atoms.info.get('G_M', None)
-            if G_M is None or G_M <= 0:
-                raise ValueError("G_M invalide ou manquant dans atoms.info.")
-
-            fixman_weight = 1.0 / math.sqrt(G_M)
-
-            # 4. Ajout des métadonnées requises
-            if getattr(atoms, 'info', None) is None:
-                atoms.info = {}
-            atoms.info["from_which_r"] = self.from_which_r
-            atoms.info["walker_id"] = self.w_i
-
-            # 5. Biaisage des vitesses
-            if self.method == "flux":
-                biased_atoms = self.bias_one_initial_condition_flux(
-                    atoms, alpha=self.alpha, temp=self.temp, rng=self.rng
-                )
-            else:
-                biased_atoms = self.bias_one_initial_condition_rayleigh(
-                    atoms, temp_phys=self.temp, temp_bias=self.temp_bias, rng=self.rng
-                )
-
-            # 6. Mise à jour des poids statistiques
-            bias_weight = biased_atoms.info.get("weight_ini_cond", 1.0)
-            total_weight = bias_weight * fixman_weight
-
-            biased_atoms.info["weight_ini_cond"] = total_weight
-            biased_atoms.info["weight_fixman"] = fixman_weight
-            biased_atoms.info["weight_bias"] = bias_weight
-
-            # 7. Sauvegarde sur disque
-            fname = os.path.join(self.ini_cond_dir, f"{prefix}{self.n_ini_conds_already + n_cdt + 1}.extxyz")
-            write(fname, biased_atoms, format="extxyz")
-
-            n_cdt += 1
-
-            # Checkpoint spécifique au marcheur
-            checkpoint_file = os.path.join(self.run_dir, str(self.w_i), f"ini_checkpoint_{self.w_i}.txt")
-            self._write_checkpoint(checkpoint_file)
 
 
 # =====================================================================
