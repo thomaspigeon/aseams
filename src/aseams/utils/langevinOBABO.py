@@ -6,6 +6,7 @@ import numpy as np
 from ase.md.md import MolecularDynamics
 from ase.constraints import FixCom
 from pathlib import Path
+from ase.io import read
 
 
 class LangevinOBABO(MolecularDynamics):
@@ -451,7 +452,6 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
         # Multiplicateurs de Lagrange des deux étapes B (notations du livre)
         self.atoms.info['lambda_half'] = float(lambda_half)         # λ^{n+1/2}
         self.atoms.info['lambda_3quarter'] = float(lambda_3quarter) # λ^{n+3/4}
-
 
 
 class ReplicaWithMC(BlueMoonOBABOWithLambdas):

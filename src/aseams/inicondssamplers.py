@@ -1461,6 +1461,248 @@ class ConstrainedMDSampler(MDDynamicSampler):
             n_cdt += 1
             self._write_checkpoint(f"{self.run_dir}/ini_checkpoint.txt")
 
+
+# =====================================================================
+#  Multiple walker constrained MD (Monte-carlo mooves)
+# =====================================================================
+
+class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
+    """
+    Échantillonneur multi-répliques générant des conditions initiales via une dynamique
+    contrainte (Blue-Moon) enrichie de sauts Monte Carlo non locaux entre les marcheurs.
+
+    Achemine la structure vers la surface cible (Steered MD), équilibre le système,
+    puis échantillonne la surface en parallèle. Des sauts Monte Carlo sont tentés
+    périodiquement pour copier l'état d'un autre marcheur, garantissant une meilleure
+    exploration ergodique.
+    """
+
+    def __init__(
+            self,
+            dyn,
+            xi,
+            n_walkers=4,
+            walker_index=0,
+            equilibration_steps=1000,
+            decorrelation_steps=100,
+            mc_interval=50,
+            mc_history_size=20,
+            method="flux",
+            alpha=0.0,
+            temp=300.0,
+            temp_bias=None,
+            from_which_r=0,
+            cv_interval=1,
+            fixcm=True,
+            rng=None,
+            n_steering_steps=50,
+            n_relax_steps=20
+    ):
+        """
+        Paramètres:
+        -----------
+        dyn : ReplicaWithMC
+            L'intégrateur de dynamique contrainte gérant les sauts Monte Carlo.
+        xi : CollectiveVariables
+            Définition de la variable collective.
+        n_walkers : int
+            Nombre total de répliques.
+        walker_index : int
+            Indice de la réplique courante (0 à n_walkers - 1).
+        equilibration_steps : int
+            Nombre de pas de MD initiaux pour la thermalisation.
+        decorrelation_steps : int
+            Nombre de pas de MD entre l'extraction de deux conditions initiales.
+        mc_interval : int
+            Nombre de pas de MD entre chaque tentative de saut Monte Carlo.
+        mc_history_size : int
+            Nombre d'états passés (frames) considérés dans le réservoir pour le tirage MC.
+        method : str
+            Méthode de biais des vitesses ('flux' ou 'rayleigh').
+        alpha : float
+            Paramètre de biais pour la méthode 'flux'.
+        temp : float
+            Température physique du système (en Kelvin).
+        temp_bias : float
+            Température de biais pour la méthode 'rayleigh' (en Kelvin).
+        from_which_r : int
+            Indice de l'état réactif d'origine.
+        n_steering_steps : int
+            Nombre d'étapes d'interpolation pour amener la contrainte vers sa cible.
+        n_relax_steps : int
+            Nombre de pas de dynamique pour relaxer la structure à chaque étape de steering.
+        """
+        super().__init__(dyn, xi, cv_interval=cv_interval, fixcm=fixcm, rng=rng)
+
+        if method not in ["flux", "rayleigh"]:
+            raise ValueError("La méthode doit être 'flux' ou 'rayleigh'")
+        if method == "rayleigh" and temp_bias is None:
+            raise ValueError("temp_bias doit être fourni si la méthode est 'rayleigh'")
+
+        self.n_walkers = n_walkers
+        self.w_i = walker_index
+        self.equilibration_steps = equilibration_steps
+        self.decorrelation_steps = decorrelation_steps
+        self.mc_interval = mc_interval
+        self.mc_history_size = mc_history_size
+        self.method = method
+        self.alpha = alpha
+        self.temp = temp
+        self.temp_bias = temp_bias
+        self.from_which_r = from_which_r
+        self.n_steering_steps = n_steering_steps
+        self.n_relax_steps = n_relax_steps
+
+    def set_run_dir(self, run_dir="./replicas_root", append_traj=False):
+        """
+        Configure le répertoire racine pour toutes les répliques.
+        Chaque marcheur écrira dans run_dir/walker_index/constrained_md.traj
+        pour que la classe ReplicaWithMC puisse s'y retrouver.
+        """
+        self.run_dir = run_dir
+        walker_dir = os.path.join(self.run_dir, str(self.w_i))
+
+        if not os.path.exists(walker_dir) and world.rank == 0:
+            os.makedirs(walker_dir, exist_ok=True)
+
+        # Le nom doit être exactement celui attendu par ReplicaWithMC.move_monte_carlo()
+        self.trajfile = os.path.join(walker_dir, "constrained_md.traj")
+
+        mode = "a" if append_traj else "w"
+        traj = self.dyn.closelater(
+            Trajectory(self.trajfile, mode, self.dyn.atoms, properties=["energy", "stress", "forces"])
+        )
+        self.dyn.attach(traj.write, interval=self.cv_interval)
+
+    def _steer_to_surface(self):
+        """
+        Amène doucement le système sur la surface cible en déplaçant progressivement
+        la valeur de la contrainte et en laissant la MD relaxer la structure.
+        """
+        if isinstance(self.xi.cv_r, list):
+            cv_func = self.xi.cv_r[self.from_which_r]
+            sigma_target_raw = self.xi.sigma_r_level[self.from_which_r]
+        else:
+            cv_func = self.xi.cv_r
+            sigma_target_raw = self.xi.sigma_r_level
+
+        atoms = self.dyn.atoms
+        val_start = cv_func(atoms)
+
+        if isinstance(sigma_target_raw, list):
+            target = sigma_target_raw[0] if abs(val_start - sigma_target_raw[0]) < abs(
+                val_start - sigma_target_raw[1]) else sigma_target_raw[1]
+        else:
+            target = sigma_target_raw
+
+        if abs(val_start - target) < 1e-5:
+            self.dyn.target_val = target
+            return
+
+        print(f"[Walker {self.w_i}] Steering: Déplacement de la contrainte de {val_start:.4f} vers {target:.4f}")
+        target_path = np.linspace(val_start, target, self.n_steering_steps + 1)[1:]
+
+        for current_target in target_path:
+            self.dyn.target_val = current_target
+            self.dyn.run(self.n_relax_steps)
+
+        print(f"[Walker {self.w_i}] Steering terminé.")
+
+    def _run_with_mc(self, steps):
+        """
+        Fait avancer la dynamique tout en tentant des sauts Monte Carlo réguliers.
+        """
+        steps_done = 0
+        while steps_done < steps:
+            chunk = min(self.mc_interval, steps - steps_done)
+            self.dyn.run(chunk)
+            steps_done += chunk
+
+            # Tentative de saut Monte Carlo
+            try:
+                accepted, info = self.dyn.move_monte_carlo(self.mc_history_size)
+                # Si le saut est accepté, il faut s'assurer que les contraintes globales
+                # (comme le centre de masse) sont proprement réinitialisées sur la nouvelle géométrie.
+                if accepted and self.fixcm:
+                    self.dyn.atoms._constraints = []
+                    self.dyn.atoms.set_constraint(FixCom())
+            except Exception:
+                # Si les autres répliques n'ont pas encore écrit assez de données,
+                # ou en cas de conflit d'accès fichier, on ignore silencieusement pour ce tour.
+                pass
+
+    def sample(self, n_conditions=100, n_steps=None):
+        if self.run_dir is None or self.ini_cond_dir is None:
+            raise ValueError("Les répertoires run_dir ou ini_cond_dir ne sont pas définis.")
+
+        n_cdt = 0
+        if self.fixcm:
+            self.dyn.fix_com = True
+            self.dyn.atoms._constraints = []
+            self.dyn.atoms.set_constraint(FixCom())
+
+        # Décompte des conditions déjà présentes pour ce marcheur
+        prefix = f"walker_{self.w_i}_ini_cond_"
+        self.n_ini_conds_already = len(
+            [f for f in os.listdir(self.ini_cond_dir) if f.startswith(prefix) and f.endswith(".extxyz")])
+
+        # --- Etape A : Acheminement en douceur ---
+        self._steer_to_surface()
+
+        # --- Etape B : Phase d'équilibration globale (avec MC) ---
+        self._run_with_mc(self.equilibration_steps)
+
+        # --- Etape C : Production ---
+        while n_cdt < n_conditions:
+
+            # 1. Évolution sur la surface (avec MC) pour décorréler les échantillons
+            self._run_with_mc(self.decorrelation_steps)
+
+            # 2. Extraction d'une copie de la configuration courante
+            atoms = self.dyn.atoms.copy()
+
+            # 3. Récupération et calcul du poids de Fixman
+            G_M = atoms.info.get('G_M', None)
+            if G_M is None or G_M <= 0:
+                raise ValueError("G_M invalide ou manquant dans atoms.info.")
+
+            fixman_weight = 1.0 / math.sqrt(G_M)
+
+            # 4. Ajout des métadonnées requises
+            if getattr(atoms, 'info', None) is None:
+                atoms.info = {}
+            atoms.info["from_which_r"] = self.from_which_r
+            atoms.info["walker_id"] = self.w_i
+
+            # 5. Biaisage des vitesses
+            if self.method == "flux":
+                biased_atoms = self.bias_one_initial_condition_flux(
+                    atoms, alpha=self.alpha, temp=self.temp, rng=self.rng
+                )
+            else:
+                biased_atoms = self.bias_one_initial_condition_rayleigh(
+                    atoms, temp_phys=self.temp, temp_bias=self.temp_bias, rng=self.rng
+                )
+
+            # 6. Mise à jour des poids statistiques
+            bias_weight = biased_atoms.info.get("weight_ini_cond", 1.0)
+            total_weight = bias_weight * fixman_weight
+
+            biased_atoms.info["weight_ini_cond"] = total_weight
+            biased_atoms.info["weight_fixman"] = fixman_weight
+            biased_atoms.info["weight_bias"] = bias_weight
+
+            # 7. Sauvegarde sur disque
+            fname = os.path.join(self.ini_cond_dir, f"{prefix}{self.n_ini_conds_already + n_cdt + 1}.extxyz")
+            write(fname, biased_atoms, format="extxyz")
+
+            n_cdt += 1
+
+            # Checkpoint spécifique au marcheur
+            checkpoint_file = os.path.join(self.run_dir, str(self.w_i), f"ini_checkpoint_{self.w_i}.txt")
+            self._write_checkpoint(checkpoint_file)
+
+
 # =====================================================================
 #  File-based sampler
 # =====================================================================
