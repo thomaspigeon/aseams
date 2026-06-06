@@ -123,6 +123,8 @@ class AMS:
         self.verbose = verbose
         self.nr_lengths = []
         self.nr_weights = []
+        self.r_lengths = None
+        self.r_weights = None
         self.save_trajectories_dir = save_trajectories_dir
         if self.save_trajectories_dir is not None:
             if not os.path.exists(self.save_trajectories_dir):
@@ -317,6 +319,7 @@ class AMS:
                 for atoms in traj:
                     atoms.info['replica_weight'] = copy(self.rep_weights[i])
                 write(self.ams_dir + "/rep_" + str(i) + ".traj", traj)
+            self._compute_reactive_lengths()
             self._write_checkpoint()
             return False
         self.remaining_killed, self.alive = self._kill_reps()
@@ -377,6 +380,18 @@ class AMS:
             self.rep_weights[i] *= ((self.n_rep - len(self.killed[-1])) / self.n_rep)
         self.current_p = np.sum(self.rep_weights)
 
+    def _compute_reactive_lengths(self):
+        """Calcule les longueurs et poids des trajectoires réactives en fin de simulation réussie"""
+        self.r_lengths = []
+        self.r_weights = []
+        for i in range(self.n_rep):
+            try:
+                traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
+                self.r_lengths.append(len(traj))
+                self.r_weights.append(copy(self.rep_weights[i]))
+            except Exception:
+                pass
+
     def p_ams(self):
         p = 0
         if not self.finished:
@@ -401,6 +416,8 @@ class AMS:
         self.rep_weights = checkpoint_data["rep_weights"]
         self.nr_lengths = checkpoint_data.get("nr_lengths", [])
         self.nr_weights = checkpoint_data.get("nr_weights", [])
+        self.r_lengths = checkpoint_data.get("r_lengths", None)
+        self.r_weights = checkpoint_data.get("r_weights", None)
         self.z_kill = checkpoint_data["z_kill"]
         self.killed = checkpoint_data["killed"]
         self.current_p = checkpoint_data["current_p"]
@@ -415,6 +432,8 @@ class AMS:
             "rep_weights": self.rep_weights,
             "nr_lengths": self.nr_lengths,
             "nr_weights": self.nr_weights,
+            "r_lengths": self.r_lengths,
+            "r_weights": self.r_weights,
             "nsteps": self.dyn.nsteps,
             "killed": self.killed,
             "alive": self.alive,
@@ -519,6 +538,7 @@ class AMS:
                                 traj = read(self.ams_dir + "/rep_" + str(i) + ".traj", index=':')
                                 for atoms in traj:
                                     atoms.info['replica_weight'] = copy(self.rep_weights[i])
+                            self._compute_reactive_lengths()
                             self._write_checkpoint()
                             return True
                         killed, self.alive = self._kill_reps()
