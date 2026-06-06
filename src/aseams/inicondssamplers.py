@@ -1275,6 +1275,193 @@ class MultiWalkerSampler(MDDynamicSampler):
 
 
 # =====================================================================
+#  Single walker constrained MD
+# =====================================================================
+
+class ConstrainedMDSampler(MDDynamicSampler):
+    """
+    Échantillonneur générant des conditions initiales via une dynamique contrainte (Blue-Moon).
+    Achemine d'abord la structure vers la surface cible via une dynamique guidée (Steered MD)
+    pour éviter les distorsions non physiques, échantillonne la surface, applique le déterminant
+    de Fixman et tire les vitesses sortantes selon une loi de Rayleigh.
+    """
+
+    def __init__(
+            self,
+            dyn,
+            xi,
+            equilibration_steps=1000,
+            decorrelation_steps=100,
+            method="flux",
+            alpha=0.0,
+            temp=300.0,
+            temp_bias=None,
+            from_which_r=0,
+            cv_interval=1,
+            fixcm=True,
+            rng=None,
+            n_steering_steps=50,
+            n_relax_steps=20
+    ):
+        """
+        Paramètres:
+        -----------
+        dyn : BlueMoonOBABOWithLambdas
+            L'intégrateur de dynamique contrainte sur la surface cible.
+        xi : CollectiveVariables
+            Définition de la variable collective.
+        decorrelation_steps : int
+            Nombre de pas de MD contrainte entre l'extraction de deux conditions initiales.
+        method : str
+            Méthode de biais des vitesses ('flux' ou 'rayleigh').
+        alpha : float
+            Paramètre de biais pour la méthode 'flux'.
+        temp : float
+            Température physique du système (en Kelvin).
+        temp_bias : float
+            Température de biais pour la méthode 'rayleigh' (en Kelvin).
+        from_which_r : int
+            Indice de l'état réactif d'origine.
+        n_steering_steps : int
+            Nombre d'étapes d'interpolation pour amener la contrainte vers sa cible en douceur.
+        n_relax_steps : int
+            Nombre de pas de dynamique moléculaire pour relaxer la structure à chaque étape d'interpolation.
+        """
+        super().__init__(dyn, xi, cv_interval=cv_interval, fixcm=fixcm, rng=rng)
+
+        if method not in ["flux", "rayleigh"]:
+            raise ValueError("La méthode doit être 'flux' ou 'rayleigh'")
+        if method == "rayleigh" and temp_bias is None:
+            raise ValueError("temp_bias doit être fourni si la méthode est 'rayleigh'")
+
+        self.decorrelation_steps = decorrelation_steps
+        self.equilibration_steps = equilibration_steps
+        self.method = method
+        self.alpha = alpha
+        self.temp = temp
+        self.temp_bias = temp_bias
+        self.from_which_r = from_which_r
+        self.n_steering_steps = n_steering_steps
+        self.n_relax_steps = n_relax_steps
+
+    def set_run_dir(self, run_dir="./ini_conds_md_logs", append_traj=False):
+        self.run_dir = run_dir
+        if not os.path.exists(run_dir) and world.rank == 0:
+            os.makedirs(run_dir, exist_ok=True)
+
+        n_traj = len([f for f in os.listdir(run_dir) if f.endswith(".traj")])
+        if not append_traj:
+            self.trajfile = f"{run_dir}/md_traj_{n_traj}.traj"
+            traj = self.dyn.closelater(
+                Trajectory(self.trajfile, "a", self.dyn.atoms, properties=["energy", "stress", "forces"])
+            )
+            self.dyn.attach(traj.write, interval=self.cv_interval)
+
+    def _steer_to_surface(self):
+        """
+        Amène doucement le système sur la surface cible en déplaçant progressivement
+        la valeur de la contrainte et en laissant la MD relaxer la structure.
+        """
+        if isinstance(self.xi.cv_r, list):
+            cv_func = self.xi.cv_r[self.from_which_r]
+            sigma_target_raw = self.xi.sigma_r_level[self.from_which_r]
+        else:
+            cv_func = self.xi.cv_r
+            sigma_target_raw = self.xi.sigma_r_level
+
+        atoms = self.dyn.atoms
+        val_start = cv_func(atoms)
+
+        # Gestion du cas "between" (on vise la borne la plus proche)
+        if isinstance(sigma_target_raw, list):
+            target = sigma_target_raw[0] if abs(val_start - sigma_target_raw[0]) < abs(
+                val_start - sigma_target_raw[1]) else sigma_target_raw[1]
+        else:
+            target = sigma_target_raw
+
+        # Si nous sommes déjà sur la surface ou extrêmement proches, on ignore
+        if abs(val_start - target) < 1e-5:
+            self.dyn.target_val = target
+            return
+
+        print(f"Steering: Déplacement de la contrainte de {val_start:.4f} vers {target:.4f}")
+
+        # Interpolation linéaire de la valeur cible
+        target_path = np.linspace(val_start, target, self.n_steering_steps + 1)[1:]
+
+        for current_target in target_path:
+            # 1. Mise à jour de la cible dans l'intégrateur
+            self.dyn.target_val = current_target
+
+            # 2. La MD va faire un petit saut de Newton interne (SHAKE) puis relaxer
+            self.dyn.run(self.n_relax_steps)
+
+        print("Steering terminé. La structure est relaxée sur la surface cible.")
+
+    def sample(self, n_conditions=100, n_steps=None):
+        if self.run_dir is None or self.ini_cond_dir is None:
+            raise ValueError("Les répertoires run_dir ou ini_cond_dir ne sont pas définis.")
+
+        n_cdt = 0
+        if self.fixcm:
+            self.dyn.fix_com = True
+            self.dyn.atoms._constraints = []
+            self.dyn.atoms.set_constraint(FixCom())
+
+        self.n_ini_conds_already = len([f for f in os.listdir(self.ini_cond_dir) if f.endswith(".extxyz")])
+
+        # --- Etape A : Acheminement en douceur sur la surface initiale ---
+        self._steer_to_surface()
+
+        # --- Etape B : Phase d'équilibration globale sur la surface ---
+        self.dyn.run(self.equilibration_steps)
+
+        while n_cdt < n_conditions:
+            # 1. Évolution sur la surface contrainte pour décorréler les échantillons
+            self.dyn.run(self.decorrelation_steps)
+
+            # 2. Extraction d'une copie de la configuration courante
+            atoms = self.dyn.atoms.copy()
+
+            # 3. Récupération et calcul du poids de Fixman : 1 / sqrt(G_M)
+            G_M = atoms.info.get('G_M', None)
+            if G_M is None or G_M <= 0:
+                raise ValueError("G_M invalide ou manquant dans atoms.info. "
+                                 "Vérifiez que l'intégrateur met bien à jour G_M.")
+
+            fixman_weight = 1.0 / math.sqrt(G_M)
+
+            # 4. Ajout des métadonnées requises par les fonctions de biais
+            if getattr(atoms, 'info', None) is None:
+                atoms.info = {}
+            atoms.info["from_which_r"] = self.from_which_r
+
+            # 5. Échantillonnage des vitesses sortantes selon une loi de Rayleigh
+            if self.method == "flux":
+                biased_atoms = self.bias_one_initial_condition_flux(
+                    atoms, alpha=self.alpha, temp=self.temp, rng=self.rng
+                )
+            else:  # method == "rayleigh"
+                biased_atoms = self.bias_one_initial_condition_rayleigh(
+                    atoms, temp_phys=self.temp, temp_bias=self.temp_bias, rng=self.rng
+                )
+
+            # 6. Mise à jour du poids total pour AMS
+            bias_weight = biased_atoms.info.get("weight_ini_cond", 1.0)
+            total_weight = bias_weight * fixman_weight
+
+            biased_atoms.info["weight_ini_cond"] = total_weight
+            biased_atoms.info["weight_fixman"] = fixman_weight
+            biased_atoms.info["weight_bias"] = bias_weight
+
+            # 7. Écriture du fichier pour cette condition initiale
+            fname = os.path.join(self.ini_cond_dir, f"{self.n_ini_conds_already + n_cdt + 1}.extxyz")
+            write(fname, biased_atoms, format="extxyz")
+
+            n_cdt += 1
+            self._write_checkpoint(f"{self.run_dir}/ini_checkpoint.txt")
+
+# =====================================================================
 #  File-based sampler
 # =====================================================================
 
