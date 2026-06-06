@@ -131,11 +131,13 @@ class CollectiveVariables:
                             self.in_r_boundary.append(in_r_boundary[i])
                     elif self.r_crit[i] == "between":
                         if not (
-                            isinstance(in_r_boundary[i], list) and isinstance(in_r_boundary[i][0], float) and isinstance(in_r_boundary[i][1], float) and in_r_boundary[i][0] >= in_r_boundary[i][1]
+                            isinstance(in_r_boundary[i], list) and isinstance(in_r_boundary[i][0], float) and isinstance(in_r_boundary[i][1], float) and (in_r_boundary[i][0] <= in_r_boundary[i][1])
                         ):
                             raise ValueError(
-                                """When cv_r is a list of functions and r_crit[i] is "between",
-                                                in_r_boundary[i] must be list of two floats in increasing order"""
+                                """
+                                When cv_r is a list of functions and r_crit[i] is "between",
+                                in_r_boundary[i] must be list of two floats in increasing order
+                                """
                             )
                         else:
                             self.in_r_boundary.append(in_r_boundary[i])
