@@ -653,12 +653,12 @@ class EABFLangevinOBABOMultiDim(MolecularDynamics):
 
         self._update_thermostat_coeffs()
 
-	# clear all constrains
+	    # clear all constrains
         self.atoms.constraints = []
         self.fix_com = fixcm
         if fixcm:
             self.atoms.set_constraint(FixCom())
-	# Do not write the first configuration
+	    # Do not write the first configuration
         self.nsteps = 1
 
     def _get_wall_force(self, lambda_val):
@@ -688,7 +688,15 @@ class EABFLangevinOBABOMultiDim(MolecularDynamics):
         self.N_visits = data['N_visits']
         self.F_bar = data['F_bar']
         self.step_counter = int(data.get('step', 0))
-        # Optionnel : vérifier ici la cohérence de la taille de la grille
+        if 'z_counts' in data:
+            self.z_counts = data['z_counts'].copy()
+        else:
+            print("[eABF][Warning] 'z_counts' introuvable dans le restart. Initialisé à zéro.")
+
+        if 'sum_lambda_z' in data:
+            self.sum_lambda_z = data['sum_lambda_z'].copy()
+        else:
+            print("[eABF][Warning] 'sum_lambda_z' introuvable dans le restart. Initialisé à zéro.")
         if self.N_visits.shape != tuple(self.n_bins):
             raise ValueError("La grille dans le fichier de sauvegarde ne correspond pas à la configuration actuelle.")
 
