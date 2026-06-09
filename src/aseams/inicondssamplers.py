@@ -10,17 +10,16 @@ Provides:
 """
 
 import inspect
-import os, json, time, shutil
+import os, json, time, shutil, glob
 import numpy as np
 import math
 import ase.units as units
 from scipy.optimize import newton
-from scipy.stats import norm
 from abc import ABC, abstractmethod
 from ase.io import Trajectory, read, write
 from ase.parallel import world, paropen, barrier
 from ase.constraints import FixCom
-from scipy.special import erfcx, erfc
+from scipy.special import erfcx
 
 from aseams.ams import NumpyEncoder
 
@@ -1450,7 +1449,7 @@ class ConstrainedMDSampler(MDDynamicSampler):
             bias_weight = biased_atoms.info.get("weight_ini_cond", 1.0)
             total_weight = bias_weight * fixman_weight
 
-            biased_atoms.info["weight_ini_cond"] = total_weight
+            #biased_atoms.info["weight_ini_cond"] = total_weight
             biased_atoms.info["weight_fixman"] = fixman_weight
             biased_atoms.info["weight_bias"] = bias_weight
 
@@ -1460,6 +1459,79 @@ class ConstrainedMDSampler(MDDynamicSampler):
 
             n_cdt += 1
             self._write_checkpoint(f"{self.run_dir}/ini_checkpoint.txt")
+
+        self.normalize_fixman_weights()
+
+    def normalize_fixman_weights(self, prefix=None):
+        """
+        Normalise uniquement le terme géométrique de Fixman pour toutes les
+        conditions initiales de ce marcheur partageant le même préfixe.
+
+        La moyenne de Fixman est ramenée à 1.0, ce qui élimine l'effet d'échelle
+        arbitraire (lié aux masses/unités) tout en préservant le biais physique
+        d'importance sampling (Flux ou Rayleigh).
+        """
+
+        # Préfixe par défaut si non spécifié
+        if prefix is None:
+            prefix = ""
+
+        # 1. Attendre que tous les processus/walkers aient fini d'écrire leurs fichiers .extxyz
+        barrier()
+
+        if world.rank == 0:
+            file_pattern = os.path.join(self.ini_cond_dir, f"{prefix}*.extxyz")
+            all_files = sorted(glob.glob(file_pattern))
+
+            if not all_files:
+                print(
+                    f"[Fixman Normalization] Aucun fichier trouvé avec le préfixe '{prefix}' dans {self.ini_cond_dir}")
+                return
+
+            structures = []
+            fixman_weights = []
+
+            # 2. Premier passage : Lecture de toutes les structures et de leurs poids de Fixman
+            for f in all_files:
+                atoms = read(f)
+                # Récupération de 1/sqrt(G_M). S'il n'est pas isolé, on prend 1.0 par défaut
+                w_fixman = atoms.info.get("weight_fixman", 1.0)
+                fixman_weights.append(w_fixman)
+                structures.append((f, atoms))
+
+            # 3. Calcul de la moyenne du facteur de Fixman sur ce pool
+            mean_fixman = np.mean(fixman_weights)
+
+            if mean_fixman > 0:
+                # 4. Second passage : Normalisation et mise à jour du poids total
+                for f, atoms in structures:
+                    w_fixman = atoms.info.get("weight_fixman", 1.0)
+                    w_fixman_norm = w_fixman / mean_fixman
+
+                    # Récupération du biais de vitesse pur (importance sampling)
+                    if "weight_bias" in atoms.info:
+                        w_bias = atoms.info["weight_bias"]
+                    else:
+                        raise ValueError("Should contain a bias weight")
+
+                    # Le nouveau poids total combine le biais physique libre et le Fixman normalisé à 1
+                    atoms.info["weight_ini_cond"] = w_bias * w_fixman_norm
+
+                    # Optionnel : On garde une trace du Fixman normalisé pour analyse
+                    atoms.info["weight_fixman_normalized"] = w_fixman_norm
+
+                    # Réécriture propre du fichier .extxyz mis à jour
+                    write(f, atoms, format="extxyz")
+
+                print(
+                    f"\n[Fixman Normalization] Correction appliquée")
+                print(f" -> {len(all_files)} fichiers mis à jour dans : {self.ini_cond_dir}")
+                print(f" -> Valeur d'échelle moyenne <1/sqrt(G_M)> : {mean_fixman:.6e}")
+            else:
+                print(f"[Fixman Normalization] Erreur : La moyenne de Fixman est nulle ou invalide ({mean_fixman}).")
+
+        # 5. Synchronisation finale pour s'assurer que le rank 0 a fini d'écrire avant la suite du code
+        barrier()
 
 
 # =====================================================================
@@ -1675,7 +1747,7 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
 
             # 7. Sauvegarde
             bias_weight = biased_atoms.info.get("weight_ini_cond", 1.0)
-            biased_atoms.info["weight_ini_cond"] = bias_weight * fixman_weight
+            #biased_atoms.info["weight_ini_cond"] = bias_weight * fixman_weight
             biased_atoms.info["weight_fixman"] = fixman_weight
             biased_atoms.info["weight_bias"] = bias_weight
 
@@ -1685,7 +1757,78 @@ class MultiWalkerConstrainedMDSampler(MDDynamicSampler):
             n_cdt += 1
             self._write_checkpoint(os.path.join(self.run_dir + str(self.w_i), f"ini_checkpoint_{self.w_i}.txt"))
 
+        self.normalize_fixman_weights()
 
+    def normalize_fixman_weights(self, prefix=None):
+        """
+        Normalise uniquement le terme géométrique de Fixman pour toutes les
+        conditions initiales de ce marcheur partageant le même préfixe.
+
+        La moyenne de Fixman est ramenée à 1.0, ce qui élimine l'effet d'échelle
+        arbitraire (lié aux masses/unités) tout en préservant le biais physique
+        d'importance sampling (Flux ou Rayleigh).
+        """
+
+        # Préfixe par défaut si non spécifié
+        if prefix is None:
+            prefix = f"walker_{self.w_i}_ini_cond_"
+
+        # 1. Attendre que tous les processus/walkers aient fini d'écrire leurs fichiers .extxyz
+        barrier()
+
+        if world.rank == 0:
+            file_pattern = os.path.join(self.ini_cond_dir, f"{prefix}*.extxyz")
+            all_files = sorted(glob.glob(file_pattern))
+
+            if not all_files:
+                print(
+                    f"[Fixman Normalization] Aucun fichier trouvé avec le préfixe '{prefix}' dans {self.ini_cond_dir}")
+                return
+
+            structures = []
+            fixman_weights = []
+
+            # 2. Premier passage : Lecture de toutes les structures et de leurs poids de Fixman
+            for f in all_files:
+                atoms = read(f)
+                # Récupération de 1/sqrt(G_M). S'il n'est pas isolé, on prend 1.0 par défaut
+                w_fixman = atoms.info.get("weight_fixman", 1.0)
+                fixman_weights.append(w_fixman)
+                structures.append((f, atoms))
+
+            # 3. Calcul de la moyenne du facteur de Fixman sur ce pool
+            mean_fixman = np.mean(fixman_weights)
+
+            if mean_fixman > 0:
+                # 4. Second passage : Normalisation et mise à jour du poids total
+                for f, atoms in structures:
+                    w_fixman = atoms.info.get("weight_fixman", 1.0)
+                    w_fixman_norm = w_fixman / mean_fixman
+
+                    # Récupération du biais de vitesse pur (importance sampling)
+                    if "weight_bias" in atoms.info:
+                        w_bias = atoms.info["weight_bias"]
+                    else:
+                        raise ValueError("Should contain a bias weight")
+
+                    # Le nouveau poids total combine le biais physique libre et le Fixman normalisé à 1
+                    atoms.info["weight_ini_cond"] = w_bias * w_fixman_norm
+
+                    # Optionnel : On garde une trace du Fixman normalisé pour analyse
+                    atoms.info["weight_fixman_normalized"] = w_fixman_norm
+
+                    # Réécriture propre du fichier .extxyz mis à jour
+                    write(f, atoms, format="extxyz")
+
+                print(
+                    f"\n[Fixman Normalization] Correction appliquée pour le marcheur {self.w_i} (préfixe: '{prefix}')")
+                print(f" -> {len(all_files)} fichiers mis à jour dans : {self.ini_cond_dir}")
+                print(f" -> Valeur d'échelle moyenne <1/sqrt(G_M)> : {mean_fixman:.6e}")
+            else:
+                print(f"[Fixman Normalization] Erreur : La moyenne de Fixman est nulle ou invalide ({mean_fixman}).")
+
+        # 5. Synchronisation finale pour s'assurer que le rank 0 a fini d'écrire avant la suite du code
+        barrier()
 
 
 # =====================================================================
