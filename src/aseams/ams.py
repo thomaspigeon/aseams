@@ -288,7 +288,7 @@ class AMS:
         indices_above = np.flatnonzero(branched_rep_rc >= z_kill - self.rc_threshold)
         if len(indices_above) == 0:
             # Print an error, this should never occur
-            raise ValueError(f"There is no level above {z_kill - self.rc_threshold} in replica {j}, connot branch !git ")
+            raise ValueError(f"There is no level above {z_kill - self.rc_threshold} in replica {j}, connot branch it ")
         else:
             branch_level = indices_above[0]
 
