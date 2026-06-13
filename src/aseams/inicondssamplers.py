@@ -149,6 +149,8 @@ class BaseInitialConditionSampler(ABC):
         self.t_sigma_r = None
         self.t_r_sigma_out = None
         self.t_sigma_out = None
+        self.t_r_sigma_side = None
+        self.t_r_sigma_out_side = None
 
     def set_ini_cond_dir(self, ini_cond_dir="./ini_conds", clean=False):
         """
@@ -577,8 +579,10 @@ class MDDynamicSampler(BaseInitialConditionSampler):
             "going_back_to_r": self.going_back_to_r,
             "t_sigma_r": self.t_sigma_r,
             "t_r_sigma": self.t_r_sigma,
+            "t_r_sigma_side": self.t_r_sigma_side,
             "t_sigma_out": self.t_sigma_out,
             "t_r_sigma_out": self.t_r_sigma_out,
+            "t_r_sigma_out_side": self.t_r_sigma_out_side,  # <--- AJOUT
             "trajfile": self.trajfile,
         }
         with paropen(filename, "w") as f:
@@ -598,8 +602,10 @@ class MDDynamicSampler(BaseInitialConditionSampler):
         self.going_back_to_r = data["going_back_to_r"]
         self.t_sigma_r = data["t_sigma_r"]
         self.t_r_sigma = data["t_r_sigma"]
+        self.t_r_sigma_side = data.get("t_r_sigma_side", None)
         self.t_sigma_out = data["t_sigma_out"]
         self.t_r_sigma_out = data["t_r_sigma_out"]
+        self.t_r_sigma_out_side = data.get("t_r_sigma_out_side", None)
 
     def _write_current_atoms(self, path="current_atoms.xyz"):
         write(path, self.dyn.atoms, format="extxyz")
@@ -654,11 +660,15 @@ class SingleWalkerSampler(MDDynamicSampler):
             self.t_sigma_r = [[] for _ in range(ncv)]
             self.t_r_sigma_out = [[] for _ in range(ncv)]
             self.t_sigma_out = [[] for _ in range(ncv)]
+            self.t_r_sigma_side = [[] for _ in range(ncv)]
+            self.t_r_sigma_out_side = [[] for _ in range(ncv)]
         else:
             self.t_r_sigma = [[]]
             self.t_sigma_r = [[]]
             self.t_r_sigma_out = [[]]
             self.t_sigma_out = [[]]
+            self.t_r_sigma_side = [[]]
+            self.t_r_sigma_out_side = [[]]
 
         self.first_in_r = False
         # Ensure we start in R
@@ -678,12 +688,35 @@ class SingleWalkerSampler(MDDynamicSampler):
             self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
             self.t_r_sigma[self.last_r_visited].append(0)
             self.t_sigma_r[self.last_r_visited].append(0)
+            self.t_r_sigma_side[self.last_r_visited].append(None)
             self.going_back_to_r, self.going_to_sigma = False, True
             valid_exit = False
             while not (self.xi.above_sigma(self.dyn.atoms) and valid_exit):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 self.t_r_sigma[self.last_r_visited][-1] += self.cv_interval
+                ## check on which side exiting
+                if inspect.isfunction(self.xi.cv_r):
+                    condition = self.xi.r_crit
+                    val_threshold = self.xi.in_r_boundary
+                    current_val = self.xi.evaluate_cv_r(self.dyn.atoms)
+                elif isinstance(self.xi.cv_r, list):
+                    condition = self.xi.r_crit[self.last_r_visited]
+                    val_threshold = self.xi.in_r_boundary[self.last_r_visited]
+                    current_val = self.xi.evaluate_cv_r(self.dyn.atoms)[self.last_r_visited]
+                else:
+                    condition = 'unknown'
+
+                if condition == 'below':
+                    side = False  # 'low' trivial
+                elif condition == 'above':
+                    side = True  # 'high' trivial
+                elif condition == 'between':
+                    v_min, v_max = val_threshold
+                    side = True if abs(current_val - v_max) < abs(current_val - v_min) else False
+                else:
+                    side = False
+                self.t_r_sigma_side[self.last_r_visited][-1] = side
                 ## Check whether the velocity is pointing out
                 if self.xi.cv_r_grad is not None:
                     if self.xi.above_sigma(self.dyn.atoms):
@@ -736,8 +769,10 @@ class SingleWalkerSampler(MDDynamicSampler):
                     self.dyn.call_observers()
                     t_sigma_out = self.t_sigma_r[self.last_r_visited].pop(-1)
                     t_r_sigma_out = self.t_r_sigma[self.last_r_visited].pop(-1)
+                    side_out = self.t_r_sigma_side[self.last_r_visited].pop(-1)
                     self.t_sigma_out[self.last_r_visited].append(t_sigma_out)
                     self.t_r_sigma_out[self.last_r_visited].append(t_r_sigma_out)
+                    self.t_r_sigma_out_side[self.last_r_visited].append(side_out)
                 if self.xi.in_r(self.dyn.atoms):
                     self.first_in_r = True
 
@@ -777,11 +812,15 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
                 self.t_r_sigma_out = [[] for i in range(len(self.xi.cv_r))]
                 self.t_sigma_out = [[] for i in range(len(self.xi.cv_r))]
+                self.t_r_sigma_side = [[] for i in range(len(self.xi.cv_r))]
+                self.t_r_sigma_out_side = [[] for i in range(len(self.xi.cv_r))]
             else:
                 self.t_r_sigma = [[]]
                 self.t_sigma_r = [[]]
                 self.t_r_sigma_out = [[]]
                 self.t_sigma_out = [[]]
+                self.t_r_sigma_side = [[]]
+                self.t_r_sigma_out_side = [[]]
         in_r = self.xi.in_r(self.dyn.atoms)
         if in_r:
             self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
@@ -820,6 +859,27 @@ class SingleWalkerSampler(MDDynamicSampler):
                 else:
                     v_dot_n = 1
                 if v_dot_n > 0:
+                    if inspect.isfunction(self.xi.cv_r):
+                        condition = self.xi.r_crit
+                        val_threshold = self.xi.in_r_boundary
+                        current_val = self.xi.evaluate_cv_r(self.dyn.atoms)
+                    elif isinstance(self.xi.cv_r, list):
+                        condition = self.xi.r_crit[self.last_r_visited]
+                        val_threshold = self.xi.in_r_boundary[self.last_r_visited]
+                        current_val = self.xi.evaluate_cv_r(self.dyn.atoms)[self.last_r_visited]
+                    else:
+                        condition = 'unknown'
+
+                    if condition == 'below':
+                        side = False  # 'low' trivial
+                    elif condition == 'above':
+                        side = True  # 'high' trivial
+                    elif condition == 'between':
+                        v_min, v_max = val_threshold
+                        side = True if abs(current_val - v_max) < abs(current_val - v_min) else False
+                    else:
+                        side = False
+                    self.t_r_sigma_side[self.last_r_visited][-1] = side
                     self.going_to_sigma = False
                     if not hasattr(self.dyn.atoms, 'info'):
                         self.dyn.atoms.info = {}
@@ -831,6 +891,7 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.going_back_to_r = False
                 self.t_r_sigma[self.last_r_visited].append(0)
                 self.t_sigma_r[self.last_r_visited].append(0)
+                self.t_r_sigma_side[self.last_r_visited].append(None)
                 self.going_to_sigma = True
             if out_of_r_zone:
                 list_atoms = read(self.trajfile, index=":")
@@ -845,8 +906,10 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.dyn.nsteps = 0
                 t_sigma_out = self.t_sigma_r[self.last_r_visited].pop(-1)
                 t_r_sigma_out = self.t_r_sigma[self.last_r_visited].pop(-1)
+                side_out = self.t_r_sigma_side[self.last_r_visited].pop(-1)
                 self.t_sigma_out[self.last_r_visited].append(t_sigma_out)
                 self.t_r_sigma_out[self.last_r_visited].append(t_r_sigma_out)
+                self.t_r_sigma_out_side[self.last_r_visited].append(side_out)
                 self._write_checkpoint(checkpoint)
                 self._write_current_atoms()
                 self.dyn.observers.pop(-1)
@@ -866,6 +929,7 @@ class SingleWalkerSampler(MDDynamicSampler):
                 self.first_in_r = True
                 self.t_r_sigma[self.last_r_visited].append(0)
                 self.t_sigma_r[self.last_r_visited].append(0)
+                self.t_r_sigma_side[self.last_r_visited].append(None)
             if out_of_r_zone:
                 list_atoms = read(self.trajfile, index=":")
                 at = list_atoms[self.rng.choice(len(list_atoms))]
@@ -934,8 +998,10 @@ class MultiWalkerSampler(MDDynamicSampler):
             "going_back_to_r": self.going_back_to_r,
             "t_sigma_r": self.t_sigma_r,
             "t_r_sigma": self.t_r_sigma,
+            "t_r_sigma_side": self.t_r_sigma_side,
             "t_sigma_out": self.t_sigma_out,
             "t_r_sigma_out": self.t_r_sigma_out,
+            "t_r_sigma_out_side": self.t_r_sigma_out_side
         }
         fname = f"{self.run_dir}{self.w_i}/ini_fv_{self.w_i}_checkpoint.txt"
         with paropen(fname, "w") as f:
@@ -958,8 +1024,10 @@ class MultiWalkerSampler(MDDynamicSampler):
         self.last_r_visited = data["last_r_visited"]
         self.t_sigma_r = data["t_sigma_r"]
         self.t_r_sigma = data["t_r_sigma"]
+        self.t_r_sigma_side = data.get("t_r_sigma_side", None)
         self.t_sigma_out = data["t_sigma_out"]
         self.t_r_sigma_out = data["t_r_sigma_out"]
+        self.t_r_sigma_out_side = data.get("t_r_sigma_out_side", None)
 
     # --------------------------------------------------------------
     def _branch_fv_particle(self):
@@ -1053,12 +1121,16 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
                 self.t_r_sigma_out = [[] for i in range(len(self.xi.cv_r))]
                 self.t_sigma_out = [[] for i in range(len(self.xi.cv_r))]
+                self.t_r_sigma_side = [[] for i in range(len(self.xi.cv_r))]
+                self.t_r_sigma_out_side = [[] for i in range(len(self.xi.cv_r))]
         else:
             if self.t_r_sigma is None:
                 self.t_r_sigma = [[]]
                 self.t_sigma_r = [[]]
                 self.t_r_sigma_out = [[]]
                 self.t_sigma_out = [[]]
+                self.t_r_sigma_side = [[]]
+                self.t_r_sigma_out_side = [[]]
         while not self.first_in_r:
             self.dyn.run(self.cv_interval)
             n_stp += self.cv_interval
@@ -1074,12 +1146,34 @@ class MultiWalkerSampler(MDDynamicSampler):
             self.going_to_sigma = True
             self.t_r_sigma[self.last_r_visited].append(0)
             self.t_sigma_r[self.last_r_visited].append(0)
+            self.t_r_sigma_side[self.last_r_visited].append(None)
             valid_exit = False
             while not (self.xi.above_sigma(self.dyn.atoms) and valid_exit):
                 self.dyn.run(self.cv_interval)
                 n_stp += self.cv_interval
                 self.t_r_sigma[self.last_r_visited][-1] += self.cv_interval
                 ## Check whether the velocity is pointing out
+                if inspect.isfunction(self.xi.cv_r):
+                    condition = self.xi.r_crit
+                    val_threshold = self.xi.in_r_boundary
+                    current_val = self.xi.evaluate_cv_r(self.dyn.atoms)
+                elif isinstance(self.xi.cv_r, list):
+                    condition = self.xi.r_crit[self.last_r_visited]
+                    val_threshold = self.xi.in_r_boundary[self.last_r_visited]
+                    current_val = self.xi.evaluate_cv_r(self.dyn.atoms)[self.last_r_visited]
+                else:
+                    condition = 'unknown'
+
+                if condition == 'below':
+                    side = False  # 'low' trivial
+                elif condition == 'above':
+                    side = True  # 'high' trivial
+                elif condition == 'between':
+                    v_min, v_max = val_threshold
+                    side = True if abs(current_val - v_max) < abs(current_val - v_min) else False
+                else:
+                    side = False
+                self.t_r_sigma_side[self.last_r_visited][-1] = side
                 if self.xi.cv_r_grad is not None:
                     if self.xi.above_sigma(self.dyn.atoms):
                         grad_r_func = self.xi.cv_r_grad[self.last_r_visited]
@@ -1128,8 +1222,10 @@ class MultiWalkerSampler(MDDynamicSampler):
                     if self.first_in_r:
                         t_sigma_out = self.t_sigma_r[self.last_r_visited].pop(-1)
                         t_r_sigma_out = self.t_r_sigma[self.last_r_visited].pop(-1)
+                        side_out = self.t_r_sigma_side[self.last_r_visited].pop(-1)
                         self.t_sigma_out[self.last_r_visited].append(t_sigma_out)
                         self.t_r_sigma_out[self.last_r_visited].append(t_r_sigma_out)
+                        self.t_r_sigma_out_side[self.last_r_visited].append(side_out)
                     self.first_in_r = False
                 if self.xi.in_r(self.dyn.atoms):
                     self.first_in_r = True
@@ -1164,11 +1260,15 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.t_sigma_r = [[] for i in range(len(self.xi.cv_r))]
                 self.t_r_sigma_out = [[] for i in range(len(self.xi.cv_r))]
                 self.t_sigma_out = [[] for i in range(len(self.xi.cv_r))]
+                self.t_r_sigma_side = [[] for i in range(len(self.xi.cv_r))]
+                self.t_r_sigma_out_side = [[] for i in range(len(self.xi.cv_r))]
             else:
                 self.t_r_sigma = [[]]
                 self.t_sigma_r = [[]]
                 self.t_r_sigma_out = [[]]
                 self.t_sigma_out = [[]]
+                self.t_r_sigma_side = [[]]
+                self.t_r_sigma_out_side = [[]]
         in_r = self.xi.in_r(self.dyn.atoms)
         if in_r:
             self.last_r_visited = np.where(self.xi.in_which_r(self.dyn.atoms) == np.max(self.xi.in_which_r(self.dyn.atoms)))[0][0]
@@ -1207,6 +1307,27 @@ class MultiWalkerSampler(MDDynamicSampler):
                 else:
                     v_dot_n = 1
                 if v_dot_n > 0:
+                    if inspect.isfunction(self.xi.cv_r):
+                        condition = self.xi.r_crit
+                        val_threshold = self.xi.in_r_boundary
+                        current_val = self.xi.evaluate_cv_r(self.dyn.atoms)
+                    elif isinstance(self.xi.cv_r, list):
+                        condition = self.xi.r_crit[self.last_r_visited]
+                        val_threshold = self.xi.in_r_boundary[self.last_r_visited]
+                        current_val = self.xi.evaluate_cv_r(self.dyn.atoms)[self.last_r_visited]
+                    else:
+                        condition = 'unknown'
+
+                    if condition == 'below':
+                        side = False  # 'low' trivial
+                    elif condition == 'above':
+                        side = True  # 'high' trivial
+                    elif condition == 'between':
+                        v_min, v_max = val_threshold
+                        side = True if abs(current_val - v_max) < abs(current_val - v_min) else False
+                    else:
+                        side = False
+                    self.t_r_sigma_side[self.last_r_visited][-1] = side
                     self.going_to_sigma = False
                     if not hasattr(self.dyn.atoms, 'info'):
                         self.dyn.atoms.info = {}
@@ -1219,6 +1340,7 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.going_back_to_r = False
                 self.t_r_sigma[self.last_r_visited].append(0)
                 self.t_sigma_r[self.last_r_visited].append(0)
+                self.t_r_sigma_side[self.last_r_visited].append(None)
                 self.going_to_sigma = True
             if out_of_r_zone:
                 at = self._branch_fv_particle()
@@ -1229,8 +1351,10 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.going_back_to_r = False
                 t_sigma_out = self.t_sigma_r[self.last_r_visited].pop(-1)
                 t_r_sigma_out = self.t_r_sigma[self.last_r_visited].pop(-1)
+                side_out = self.t_r_sigma_side[self.last_r_visited].pop(-1)
                 self.t_sigma_out[self.last_r_visited].append(t_sigma_out)
                 self.t_r_sigma_out[self.last_r_visited].append(t_r_sigma_out)
+                self.t_r_sigma_out_side[self.last_r_visited].append(side_out)
                 self._write_checkpoint()
                 self._write_current_atoms()
                 self.dyn.observers.pop(-1)
@@ -1250,6 +1374,7 @@ class MultiWalkerSampler(MDDynamicSampler):
                 self.first_in_r = True
                 self.t_r_sigma[self.last_r_visited].append(0)
                 self.t_sigma_r[self.last_r_visited].append(0)
+                self.t_r_sigma_side[self.last_r_visited].append(None)
             if out_of_r_zone:
                 at = self._branch_fv_particle()
                 self._set_initialcond_dyn(at)
