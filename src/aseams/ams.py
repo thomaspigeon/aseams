@@ -285,10 +285,10 @@ class AMS:
         self.rep_weights[i] = copy(self.rep_weights[j])
         branched_rep = read(filename=self.ams_dir + "/rep_" + str(j) + ".traj", format="traj", index=":")
         branched_rep_rc = np.array([atoms.info['rc'] for atoms in branched_rep])
-        indices_above = np.flatnonzero(branched_rep_rc >= z_kill - self.rc_threshold)
+        indices_above = np.flatnonzero(branched_rep_rc >= z_kill + self.rc_threshold)
         if len(indices_above) == 0:
             # Print an error, this should never occur
-            raise ValueError(f"There is no level above {z_kill - self.rc_threshold} in replica {j}, connot branch it ")
+            raise ValueError(f"There is no level above {z_kill + self.rc_threshold} in replica {j}, connot branch it ")
         else:
             branch_level = indices_above[0]
 
