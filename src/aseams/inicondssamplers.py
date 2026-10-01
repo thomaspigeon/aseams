@@ -390,12 +390,13 @@ class BaseInitialConditionSampler(ABC):
         # Protection : rho ne doit jamais dépasser 1 en valeur absolue.
         # Des erreurs numériques sur des systèmes complexes peuvent l'induire.
         delta_p_R = np.clip(delta_p_R_raw, -alpha * sigma_p_R, alpha * sigma_p_R)
+        alpha_eff = delta_p_R / sigma_p_R
 
         # --- 4. Sampling ---
         p_n_sampled = sample_biased_p_r(delta_p_R, sigma_p_R, rng=rng)
 
         # Bruit thermique translaté par le boost alpha selon la coordonnée de réaction
-        delta_p_vec = (alpha * sigma_p_R) * eta_xi
+        delta_p_vec = (alpha_eff * sigma_p_R) * eta_xi
         p_th = rng.normal(0, sigma_p_R * np.sqrt(m_3n))
         p_full = delta_p_vec + p_th
 
@@ -408,7 +409,7 @@ class BaseInitialConditionSampler(ABC):
         R_Z = z_star / (sigma_p_R ** 2)
 
         p_xi = np.dot(p_final, e_xi_config)
-        arg_exp = -alpha * (p_xi / sigma_p_R) + (alpha ** 2 / 2.0)
+        arg_exp = -alpha_eff * (p_xi / sigma_p_R) + (alpha_eff ** 2 / 2.0)
 
         # Calcul sécurisé : log(W) = log(R_Z) + arg_exp
         log_weight = math.log(R_Z) + arg_exp
