@@ -3,6 +3,7 @@ from typing import Optional
 from ase import Atoms, units
 from ase.units import kB
 import numpy as np
+import time
 from ase.md.md import MolecularDynamics
 from ase.constraints import FixCom
 from pathlib import Path
@@ -156,7 +157,7 @@ class LangevinOBABO(MolecularDynamics):
                 self.atoms.set_positions(q, apply_constraint=False)
 
             # Mise à jour des forces pour la suite
-            forces = self.atoms.get_forces()
+            forces = self.atoms.get_forces(md=True)
 
             # --- Étape B (Demi-kick de force) ---
             p = p + (self.dt / 2) * forces
@@ -231,7 +232,10 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
 
     def __init__(self, atoms, timestep, friction, temperature_K,
                  constraint_func, rng=None, iter_max=100, tol=1e-8,
-                 logfile=None, trajectory=None, fixcm=False):
+                 logfile=None, trajectory=None, fixcm=False,
+                 shake_max_lambda=0.01, shake_damping=0.5,
+                 shake_min_damping=1e-3, shake_max_backtrack=100,
+                 shake_min_derivative=1e-12, shake_verbose=False):
 
         super().__init__(atoms, timestep, logfile, trajectory)
 
@@ -255,6 +259,14 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
         # Valeur cible de la contrainte (scalaire)
         val, _ = self.constraint_func(self.atoms)
         self.target_val = val
+
+        #Paramètres de SHAKE
+        self.shake_max_lambda = shake_max_lambda
+        self.shake_damping = shake_damping
+        self.shake_min_damping = shake_min_damping
+        self.shake_max_backtrack = shake_max_backtrack
+        self.shake_min_derivative = shake_min_derivative
+        self.shake_verbose = shake_verbose
 
         # Champs info
         self.atoms.info['lambda_half'] = 0.0
@@ -284,6 +296,8 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
 
         (G_M = ∇xi^T M^{-1} ∇xi, pas de racine carrée.)
         """
+        if not np.isfinite(G_M) or G_M < self.shake_min_derivative:
+            raise RuntimeError(f"[PROJECT] G_M invalide ou trop petit : G_M={G_M:.6e}")
         inv_masses = 1.0 / self.atoms.get_masses()
         p_dot_grad_M = np.sum(p * inv_masses[:, np.newaxis] * grad)
         alpha = p_dot_grad_M / G_M
@@ -313,20 +327,159 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
             p_proj = p_star + ∇xi λ^B
         exactement comme dans l’équation (3.160) (sans facteur dt/2).
         """
+        if not np.isfinite(G_M) or G_M < self.shake_min_derivative:
+            raise RuntimeError(f"[PROJECT] G_M invalide ou trop petit : G_M={G_M:.6e}" )
         inv_masses = 1.0 / self.atoms.get_masses()
         p_dot_grad_M = np.sum(p * inv_masses[:, np.newaxis] * grad)
         alpha = p_dot_grad_M / G_M
-
         p_proj = p - alpha * grad
-
         # *** CORRECTION CLEF ***
         # λ^B doit satisfaire p_proj = p_star + ∇xi λ^B, donc λ^B = -alpha
         lambda_B = -alpha
 
         return p_proj, lambda_B
 
-    # ---------- Étape O : Langevin (OU) + projection tangentielle ----------
+    def _shake_log(self, message):
+        """
+        Affiche un diagnostic SHAKE uniquement lorsque
+        shake_verbose=True.
+        """
+        if self.shake_verbose:
+            print(message, flush=True)
 
+    def _shake_correct(self, pos_current, target_val, inv_masses):
+        """
+        Projection robuste de la gestion des zones à faible G_M et des micro-oscillations.
+        """
+        target_val = float(np.asarray(target_val).squeeze())
+        best_pos = pos_current.copy()
+        best_error = float('inf')
+
+        for shake_iter in range(self.iter_max):
+            iter_start = time.perf_counter()
+
+            # Position courante effectivement évaluée
+            self.atoms.set_positions(pos_current)
+
+            val, grad_current = self.constraint_func(self.atoms)
+            val = float(np.asarray(val).squeeze())
+            grad_current = np.asarray(grad_current, dtype=np.float64)
+
+            diff = val - target_val
+            error = abs(diff)
+
+            # Mémorisation du meilleur état global rencontré
+            if error < best_error:
+                best_error = error
+                best_pos = pos_current.copy()
+
+            if not np.isfinite(val) or not np.all(np.isfinite(grad_current)):
+                raise FloatingPointError("[SHAKE] Valeurs non finies (NaN/Inf) détectées.")
+
+            # Critère de convergence principal
+            if error < self.tol:
+                return pos_current, True, shake_iter + 1, val, diff
+
+            # Direction de correction : d = M^{-1} grad_current
+            direction = inv_masses * grad_current
+            derivative = np.sum(grad_current * direction)  # G_M
+
+            if derivative < self.shake_min_derivative:
+                derivative = max(derivative, 1e-5)
+
+            d_lambda_newton = -diff / derivative
+
+            if not np.isfinite(d_lambda_newton):
+                raise FloatingPointError(
+                    f"[SHAKE] d_lambda Newton non fini : {d_lambda_newton}"
+                )
+
+            # CONTRÔLE DE LA TENSION DE FAIBLE COURBURE (G_M faible) :
+            # Si G_M est petit, on bride le pas de Newton pour éviter l'overshoot brutal.
+            if derivative < 0.01:
+                d_lambda_newton = np.clip(d_lambda_newton, -0.05, 0.05)
+
+            damping = self.shake_damping
+            accepted = False
+            trial_pos = pos_current
+            min_trial_error = error
+
+            for backtrack in range(self.shake_max_backtrack):
+                proposed_lambda = damping * d_lambda_newton
+                proposed_lambda = np.clip(
+                    proposed_lambda,
+                    -self.shake_max_lambda,
+                    +self.shake_max_lambda,
+                )
+
+                candidate_pos = pos_current + proposed_lambda * direction
+
+                if not np.all(np.isfinite(candidate_pos)):
+                    damping *= 0.5
+                    if damping < self.shake_min_damping:
+                        break
+                    continue
+
+                self.atoms.set_positions(candidate_pos)
+                candidate_val, _ = self.constraint_func(self.atoms)
+                candidate_val = float(np.asarray(candidate_val).squeeze())
+                candidate_diff = candidate_val - target_val
+                candidate_error = abs(candidate_diff)
+
+                # On retient le meilleur candidat du backtracking
+                if candidate_error < min_trial_error:
+                    min_trial_error = candidate_error
+                    trial_pos = candidate_pos
+                    accepted = True
+
+                if candidate_error < error:
+                    accepted = True
+                    trial_pos = candidate_pos
+                    break
+
+                damping *= 0.5
+                if damping < self.shake_min_damping:
+                    break
+
+            if not accepted:
+                # Si l'erreur globale est déjà faible (< 1e-3), on accepte le meilleur état mémorisé
+                if best_error < 1e-3:
+                    self.atoms.set_positions(best_pos)
+                    return best_pos, True, shake_iter + 1, target_val + best_error, best_error
+
+                # Repli par gradient direct si le backtracking échoue complètement
+                grad_norm_sq = np.sum(grad_current ** 2)
+                if grad_norm_sq > 1e-12:
+                    step_gd = -0.05 * diff * (grad_current / grad_norm_sq)
+                    candidate_pos = pos_current + step_gd
+                    self.atoms.set_positions(candidate_pos)
+                    val_gd, _ = self.constraint_func(self.atoms)
+                    val_gd = float(np.asarray(val_gd).squeeze())
+                    if abs(val_gd - target_val) < error:
+                        pos_current = candidate_pos
+                        continue
+
+                # Restauration propre de la meilleure position avant de lever l'erreur
+                self.atoms.set_positions(best_pos)
+                raise RuntimeError(
+                    "[SHAKE] aucune correction améliorante trouvée : "
+                    f"iter={shake_iter + 1}, xi={val:.8e}, target={target_val:.8e}, "
+                    f"diff={diff:.8e}, G_M={derivative:.8e}, d_lambda_newton={d_lambda_newton:.8e}"
+                )
+
+            pos_current = trial_pos
+
+        # Si le nombre d'itérations max est atteint mais que l'erreur est acceptable
+        if best_error < 1e-3:
+            self.atoms.set_positions(best_pos)
+            return best_pos, True, self.iter_max, target_val + best_error, best_error
+
+        self.atoms.set_positions(best_pos)
+        raise RuntimeError(
+            f"[SHAKE] non-convergence après {self.iter_max} itérations : best_error={best_error:.8e}"
+        )
+
+    # ---------- Étape O : Langevin (OU) + projection tangentielle ----------
     def _step_O(self, p, grad, G_M):
         """
         Étape O de durée dt/2 pour :
@@ -388,7 +541,7 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
         p = self._step_O(p, grad_n, G_M_n)
 
         # ---- 2. B(dt/2) en (q^n) : p^{n+1/4} -> p^{n+1/2}, λ^{n+1/2} ----
-        forces_n = self.atoms.get_forces()  # ASE: forces = -∇V
+        forces_n = self.atoms.get_forces(md=True)  # ASE: forces = -∇V
         p += 0.5 * self.dt * forces_n       # p_star = p^{n+1/4} + (dt/2) F(q^n)
 
         p, lambda_half = self._project_momenta_and_lambda_B(p, grad_n, G_M_n)
@@ -399,6 +552,25 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
         # Proposition non contrainte (sans SHAKE)
         pos_current = pos_old + self.dt * (p * inv_masses)
 
+        shake_start = time.perf_counter()
+
+        pos_current, shake_converged, shake_iterations, val, diff = (
+            self._shake_correct(
+                pos_current=pos_current,
+                target_val=self.target_val,
+                inv_masses=inv_masses,
+            )
+        )
+
+        shake_time = time.perf_counter() - shake_start
+
+        self._shake_log(
+            f"[SHAKE] terminé en {shake_iterations} itérations, "
+            f"durée totale={shake_time:.3f}s, "
+            f"erreur finale={abs(diff):.8e}"
+        )
+
+        """
         # Newton pour imposer xi(q^{n+1}) = target_val (direction ~ M^{-1} grad_n)
         for _ in range(self.iter_max):
             self.atoms.set_positions(pos_current)
@@ -417,7 +589,7 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
                 f"Newton n'a pas convergé après {self.iter_max} itérations "
                 f"(diff={diff:.2e})"
             )
-
+        """
         # q^{n+1}
         if self.fix_com:
             self.atoms.set_positions(pos_current, apply_constraint=True)
@@ -428,7 +600,7 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
         # RATTLE : reconstitue p^{n+1/2} cohérent avec q^{n+1}
         #p = (self.atoms.get_positions() - pos_old) * masses / self.dt
 
-        forces_next = self.atoms.get_forces()  # forces en q^{n+1}
+        forces_next = self.atoms.get_forces(md=True)  # forces en q^{n+1}
         p += 0.5 * self.dt * forces_next       # p_star en q^{n+1}
 
         _, grad_next = self.constraint_func(self.atoms)
@@ -442,7 +614,7 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
         p = self._step_O(p, grad_next, G_M_next)
 
         # p^{n+1}
-        self.atoms.set_momenta(p)
+        self.atoms.set_momenta(p, apply_constraint=False)
 
         # ---- Stockage (fin de pas) ----
         # G_M(q^{n+1}) = ∇xi(q^{n+1})^T M^{-1} ∇xi(q^{n+1})
@@ -831,7 +1003,7 @@ class EABFLangevinOBABOMultiDim(MolecularDynamics):
 
         # 6. O (Thermostat 2)
         p, self.pi_val = self._step_O(p, self.pi_val)
-        self.atoms.set_momenta(p)
+        self.atoms.set_momenta(p, apply_constraint=False)
 
         self.step_counter += 1
         if self.step_counter % self.save_freq == 0:
@@ -1005,7 +1177,7 @@ class EABFProductionSegments(EABFLangevinOBABOMultiDim):
 
         # 6. O (Thermostat 2)
         p, self.pi_val = self._step_O(p, self.pi_val)
-        self.atoms.set_momenta(p)
+        self.atoms.set_momenta(p, apply_constraint=False)
 
         self.step_counter += 1
         self.current_block_step += 1
