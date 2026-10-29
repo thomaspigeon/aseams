@@ -273,6 +273,10 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
         self.atoms.info['lambda_3quarter'] = 0.0
         self.atoms.info['G_M'] = 0.0
         self.atoms.info['G'] = 0.0
+        self.atoms.arrays['lambda_half'] = 0.0
+        self.atoms.arrays['lambda_3quarter'] = 0.0
+        self.atoms.arrays['G_M'] = 0.0
+        self.atoms.arrays['G'] = 0.0
 
     # ---------- G_M(q) = ∇xi^T M^{-1} ∇xi ----------
 
@@ -620,10 +624,14 @@ class BlueMoonOBABOWithLambdas(MolecularDynamics):
         # G_M(q^{n+1}) = ∇xi(q^{n+1})^T M^{-1} ∇xi(q^{n+1})
         self.atoms.info['G_M'] = float(G_M_next)
         self.atoms.info['G'] = float(G_next)
+        self.atoms.arrays['G_M'] = float(G_M_next)
+        self.atoms.arrays['G'] = float(G_next)
 
         # Multiplicateurs de Lagrange des deux étapes B (notations du livre)
         self.atoms.info['lambda_half'] = float(lambda_half)         # λ^{n+1/2}
         self.atoms.info['lambda_3quarter'] = float(lambda_3quarter) # λ^{n+3/4}
+        self.atoms.arrays['lambda_half'] = float(lambda_half)  # λ^{n+1/2}
+        self.atoms.arrays['lambda_3quarter'] = float(lambda_3quarter)  # λ^{n+3/4}
 
 
 class ReplicaWithMC(BlueMoonOBABOWithLambdas):
